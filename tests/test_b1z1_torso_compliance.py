@@ -139,6 +139,8 @@ def test_wrench_logging_replay_and_reset_do_not_advance_targets():
     model, kw=fixture(2)
     result=model.advance(**kw,torso_wrench=torch.tensor([[4.,0.,2.]]).expand(2,-1))
     task=ComplianceTask.__new__(ComplianceTask)
+    task.recovery_failed=torch.zeros(2,dtype=torch.bool)
+    task.recovery_rejections=torch.zeros(2,4,4,dtype=torch.bool)
     task.reference=model;task.coverage=DisturbanceCoverage(None,2,'cpu')
     task.wrench_sum=torch.stack((result.torso_wrench,result.ee_wrench,result.combined_wrench),1)*3
     task.wrench_count=torch.ones(2)*3;task.target=None

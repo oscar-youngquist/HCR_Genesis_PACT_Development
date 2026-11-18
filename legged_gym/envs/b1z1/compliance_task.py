@@ -102,11 +102,17 @@ class ComplianceTask:
         self.command_limits=torch.tensor([env.command_ranges[k] for k in ('lin_vel_x','lin_vel_y','ang_vel_yaw')],device=env.device)
         self.target=None
         self.interval=None
+        self.recovery_failed=torch.zeros(env.num_envs,device=env.device,dtype=torch.bool)
+        # Candidate order: nominal, previous, measured, midpoint. Check order:
+        # workspace, EE geometry, forbidden box, ground. True means rejected.
+        self.recovery_rejections=torch.zeros(env.num_envs,4,4,device=env.device,dtype=torch.bool)
 
     @property
     def profile(self):return self.reference.profile
 
     def reset(self,ids):
+        self.recovery_failed[ids]=False
+        self.recovery_rejections[ids]=False
         self.reference.reset(ids)
         self.coverage.reset(ids)
         self.wrench_sum[ids]=0;self.wrench_count[ids]=0
@@ -136,6 +142,8 @@ class ComplianceTask:
     @torch.no_grad()
     def begin(self):
         env=self.env; sim=env.simulator; c=env.cfg.compliance
+        self.recovery_failed.zero_()
+        self.recovery_rejections.zero_()
         nominal,nominal_velocity=self.nominal(1)
         # The first accepted reference is the actual interval-start nominal,
         # not the next nominal reconstructed with yesterday's offset.
@@ -220,15 +228,20 @@ class ComplianceTask:
             # point. Fallback anchors may require changing disabled coordinates.
             midpoint=center+cartesian(self.bounds.mean(-1).expand_as(nominal))
             selected=nominal.clone();found=torch.zeros(len(q),device=q.device,dtype=torch.bool)
-            for point in (nominal,previous,measured,midpoint):
+            for index,point in enumerate((nominal,previous,measured,midpoint)):
                 local=point-center
-                valid=feasible(point,center,self.bounds)
-                valid &= self.geometry.point_clearance(body(point),arm_points,legs).amin(-1)>=0
-                valid &= ~((local>env.collision_lower_limits)&(local<env.collision_upper_limits)).all(-1)
-                valid &= local[:,2]>=env.underground_limit
+                checks=torch.stack((feasible(point,center,self.bounds),
+                    self.geometry.point_clearance(body(point),arm_points,legs).amin(-1)>=0,
+                    ~((local>env.collision_lower_limits)&(local<env.collision_upper_limits)).all(-1),
+                    local[:,2]>=env.underground_limit),-1)
+                self.recovery_rejections[:,index]=~checks & recovering[:,None]
+                valid=checks.all(-1)
                 selected=torch.where((valid&~found)[:,None],point,selected);found |= valid
-            if not (found|~recovering).all():raise RuntimeError('No collision-free compliance recovery anchor; reset affected environment')
-            return selected
+            self.recovery_failed.copy_(recovering & ~found)
+            # A workspace-valid numerical placeholder, NOT a certified target.
+            # References never actuate the robot. Finish the issued action's
+            # interval and terminate only these rows through normal bookkeeping.
+            return torch.where(self.recovery_failed[:,None],midpoint,selected)
 
         if c.compile_geometry and not getattr(self, '_recovery_geometry_ready', False):
             # Warm the rare recovery-only 2D signature during the first interval,
@@ -266,6 +279,9 @@ class ComplianceTask:
                for i,source in enumerate(('torso','ee_gated','combined'))
                for j,axis in enumerate(('fx_N','fy_N','tz_Nm'))}
         stats['compliance_wrench/interval_count']=count
+        stats['compliance_recovery/failure_fraction']=self.recovery_failed[ids].float().mean()
+        for j,name in enumerate(('workspace','ee_geometry','forbidden_box','ground')):
+            stats[f'compliance_recovery/{name}_rejected_fraction']=self.recovery_rejections[ids,:,j].any(-1).float().mean()
         if self.coverage.weights is not None:
             stats.update({f'compliance_disturbance/{name}_fraction':(self.coverage.ids[ids]==i).float().mean()
                           for i,name in enumerate(('ee_only','torso_only','simultaneous'))})

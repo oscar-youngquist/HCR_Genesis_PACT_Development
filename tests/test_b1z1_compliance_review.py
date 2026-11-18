@@ -60,6 +60,8 @@ def actual_urdf_task():
     task.bounds=k['bounds'];task.command_limits=k['command_limits']
     task.center=lambda:base;task.nominal=lambda advance:(ee,torch.zeros_like(ee))
     task.wrench_sum=ee.new_zeros(3,3,3);task.wrench_count=ee.new_zeros(3)
+    task.recovery_failed=torch.zeros(3,dtype=torch.bool)
+    task.recovery_rejections=torch.zeros(3,4,4,dtype=torch.bool)
     task.workspace_clearance=segment_box
     return g,q,ee,task
 
@@ -148,8 +150,10 @@ def test_recovery_anchor_checks_geometry_and_reports_no_safe_anchor():
     assert task.target.velocity.eq(0).all()
     task.reference.accepted.fill_(-5)
     task.env.underground_limit=100
-    with pytest.raises(RuntimeError,match='No collision-free compliance recovery anchor'):
-        task.begin()
+    task.begin()
+    assert task.recovery_failed.all()
+    assert task.recovery_rejections[:,:,3].all()
+    assert torch.isfinite(task.target.position).all()
 
 
 def test_lateral_only_boundary_has_no_radial_redirection():
@@ -159,6 +163,60 @@ def test_lateral_only_boundary_has_no_radial_redirection():
     torch.testing.assert_close(r.position[:,0],k['nominal'][:,0],rtol=0,atol=0)
     assert r.position[:,1].min()>0 and r.position.norm(dim=-1).max()<=.900001
     assert m.delta[:,[0,2]].eq(0).all() and m.rate[:,[0,2]].eq(0).all()
+
+
+def test_failed_recovery_is_row_local_and_reset_preserves_terminal_diagnostics():
+    from legged_gym.envs.b1z1.compliance_task import DisturbanceCoverage
+    _,_,_,baseline=actual_urdf_task()
+    _,_,_,task=actual_urdf_task()
+    for item in (baseline,task):
+        item.reference.accepted.fill_(-5)
+        item.reference.initialized.fill_(True)
+    clearance=task.geometry.point_clearance
+    def blocked_first(*args):
+        result=clearance(*args).clone()
+        result[0]=-1
+        return result
+    task.geometry.point_clearance=blocked_first
+    baseline.begin();task.begin()
+    assert task.recovery_failed.tolist()==[True,False,False]
+    torch.testing.assert_close(task.target.position[1:],baseline.target.position[1:])
+    torch.testing.assert_close(task.target.base[1:],baseline.target.base[1:])
+    assert torch.isfinite(task.target.position).all()
+    snapshot=task.recovery_rejections.clone()
+    interval=task.interval['compliance_position'].clone()
+    task.coverage=DisturbanceCoverage(None,3,'cpu')
+    task.reset(torch.tensor([0]))
+    assert not task.recovery_failed.any()
+    assert not task.recovery_rejections[0].any()
+    assert snapshot[0,:,1].all()
+    torch.testing.assert_close(task.interval['compliance_position'],interval)
+
+
+def test_recovery_termination_overrides_timeout_and_snapshots_survive_reset():
+    # Execute the real termination method without importing a simulator backend.
+    import ast
+    from pathlib import Path
+    path=Path(__file__).resolve().parents[1]/'legged_gym/envs/b1z1/b1z1_pact/b1z1_pact.py'
+    cls=next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.ClassDef))
+    method=next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='check_termination')
+    namespace={'torch':torch}
+    exec(compile(ast.Module(body=[method],type_ignores=[]),str(path),'exec'),namespace)
+    env=SimpleNamespace(cfg=SimpleNamespace(termination=SimpleNamespace(termination_terms=[])),
+        simulator=SimpleNamespace(termination_contact_indices=[],base_euler=torch.zeros(3,3),
+            base_pos=torch.zeros(3,3),measured_heights=torch.zeros(3,1)),
+        termination_contact_counter=torch.zeros(3),episode_length_buf=torch.tensor([11,11,2]),
+        max_episode_length=10,extras={},compliance=SimpleNamespace(
+            recovery_failed=torch.tensor([True,False,False]),
+            recovery_rejections=torch.ones(3,4,4,dtype=torch.bool)))
+    for name in ('fail_buf','contact_fail_buf','roll_fail_buf','pitch_fail_buf','height_min_fail_buf','height_max_fail_buf'):
+        setattr(env,name,torch.zeros(3,dtype=torch.bool))
+    namespace['check_termination'](env)
+    assert env.reset_buf.tolist()==[True,True,False]
+    assert env.fail_buf.tolist()==[True,False,False]
+    assert env.time_out_buf.tolist()==[False,True,False]
+    env.compliance.recovery_failed.zero_()
+    assert env.extras['compliance_recovery_failed'].tolist()==[True,False,False]
 
 
 def test_first_exit_inner_hole_angles_and_combined_direction():

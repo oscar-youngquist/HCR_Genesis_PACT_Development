@@ -409,6 +409,14 @@ class B1Z1PACT(LeggedRobot):
             self.fail_buf |= self.height_max_fail_buf
 
         self.time_out_buf = self.episode_length_buf > self.max_episode_length
+        if getattr(self, "compliance", None) is not None:
+            failed = self.compliance.recovery_failed
+            self.fail_buf |= failed
+            # Reference failure is terminal even when the episode clock expires:
+            # never bootstrap from a reset observation for these transitions.
+            self.time_out_buf &= ~failed
+            self.extras["compliance_recovery_failed"] = failed.clone()
+            self.extras["compliance_recovery_rejections"] = self.compliance.recovery_rejections.clone()
         self.reset_buf = self.fail_buf | self.time_out_buf
 
     def reset_idx(self, env_ids):
