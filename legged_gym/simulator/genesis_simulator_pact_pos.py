@@ -50,6 +50,10 @@ class GenesisSimulator_PACT_Pos(Simulator):
             torque=wrench[:, 3:].unsqueeze(1), links_idx=base,
             envs_idx=None, ref="link_com", local=False,
         )
+
+    def hard_pact_wrench_at_base_origin_world(self, wrench):
+        from .genesis_simulator_pact import GenesisSimulator_PACT
+        return GenesisSimulator_PACT.hard_pact_wrench_at_base_origin_world(self, wrench)
     def __init__(self, cfg, sim_params: dict, device, headless):
         self._sim_params = sim_params
         super().__init__(cfg, sim_params, device, headless)

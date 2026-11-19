@@ -61,6 +61,13 @@ class GenesisSimulator_PACT(Simulator):
             envs_idx=None, ref="link_com", local=False,
         )
 
+    def hard_pact_wrench_at_base_origin_world(self, wrench):
+        """Genesis applies at link CoM; QP/decoder use the base-link origin."""
+        from legged_gym.dynamics import wrench_at_point
+        com = self._robot.get_links_pos([self._base_link_index], ref='link_com')[:, 0]
+        origin = self._robot.get_links_pos([self._base_link_index], ref='link_origin')[:, 0]
+        return wrench_at_point(wrench, com, origin)
+
     def hard_pact_capabilities(self):
         features = {
             name: True for name in (

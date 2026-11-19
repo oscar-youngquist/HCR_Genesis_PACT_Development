@@ -53,6 +53,8 @@ def test_pinn_wiring_does_not_consume_mass_wrench_diagnostic():
     # Actual randomized inertia is still supplied to BARD; the QP stays separate.
     assert '"added_base_mass": batch["realized_added_mass"].detach()' in source
     assert '"base_com_shift": batch["realized_com_shift_body"].detach()' in source
+    assert 'wrench_at_point' not in source
+    assert 'wrench_application_offset_body' not in source
 
 
 @pytest.mark.parametrize('composer_api',[True,False])
@@ -91,8 +93,72 @@ def test_isaaclab_wrench_application_point_tracks_full_rotated_com(composer_api,
             link_moment=wrench[:,3:]+torch.cross(world_offset,wrench[:,:3],dim=-1)
             torch.testing.assert_close(link_moment-torch.cross(world_offset,wrench[:,:3],dim=-1),wrench[:,3:])
         else: assert 'positions' not in call
+        equivalent = sim.hard_pact_wrench_at_base_origin_world(wrench)
+        torch.testing.assert_close(equivalent[:,:3], wrench[:,:3])
+        torch.testing.assert_close(equivalent[:,3:], link_moment if enabled else wrench[:,3:])
     assert len(resets)==(2 if composer_api else 0)
     torch.testing.assert_close(wrench,original)
+
+
+@pytest.mark.parametrize('task_class',[Go2HardPACT,Go2HardPACTPos])
+def test_base_origin_labels_shift_each_substep_before_yaw_and_averaging(task_class):
+    from legged_gym.dynamics import wrench_at_point
+    from legged_gym.utils.math_utils import quat_apply
+    from legged_gym.envs.go2.go2_hard_pact.transition import wrench_world_to_yaw_local
+    task = _persistent_task(task_class=task_class)
+    task.obs_scales = SimpleNamespace(base_wrench=.01)
+    task._realized_added_mass = torch.tensor([[3.]])
+    task._realized_com_shift_body = torch.tensor([[.1,0.,0.]])
+    for suffix in ('sustained','mass_com','total','sustained_yaw_scaled',
+                   'mass_com_yaw_scaled','yaw_scaled','yaw_physical'):
+        setattr(task,'_disturbance_interval_sum_'+suffix,torch.zeros(1,6))
+    task._disturbance_interval_count=torch.zeros(1,1)
+    applied=[]; labels=[]; yaw_labels=[]
+    task.simulator.hard_pact_apply_base_wrench_world=lambda w:applied.append(w.clone())
+    wrench=torch.tensor([[0.,0.,-50.,1.,2.,3.]])
+    for quat in (torch.tensor([[0.,0.,0.,1.]]),torch.tensor([[0.,0.,2**-.5,2**-.5]])):
+        task._current_base_quat_xyzw=lambda:quat
+        arm=quat_apply(quat,task._realized_com_shift_body)
+        task.simulator.hard_pact_wrench_at_base_origin_world=lambda w:wrench_at_point(w,arm,torch.zeros_like(arm))
+        task._current_sustained_wrench_world.copy_(wrench)
+        task._hard_pact_pre_physics_substep()
+        labels.append(wrench_at_point(wrench,arm,torch.zeros_like(arm)))
+        yaw_labels.append(wrench_world_to_yaw_local(labels[-1],quat))
+    packet=task._end_disturbance_interval()
+    torch.testing.assert_close(labels[0][:,3:],torch.tensor([[1.,7.,3.]]))
+    torch.testing.assert_close(packet['total_external_wrench_label_world'],torch.stack(labels).mean(0))
+    torch.testing.assert_close(packet['total_external_wrench_label_yaw_normalized'],
+        torch.stack(yaw_labels).mean(0)/torch.tensor(task.cfg.deployment_physics.wrench_scale))
+    torch.testing.assert_close(packet['applied_sustained_wrench_world'],wrench)
+    assert all(torch.equal(w,wrench) for w in applied)  # no double physical moment
+
+
+def test_head_checkpoint_rejects_old_or_wrong_origin_even_non_strict():
+    from rsl_rl.modules.hard_pact_physics import DeploymentPhysicsHeads
+    head=DeploymentPhysicsHeads(grf_scale_n=[100.]*12,wrench_scale=[100.]*6,wrench_qp_clip=[100.]*6)
+    state=head.state_dict()
+    head.load_state_dict(state)
+    for marker in (None,torch.tensor(2)):
+        old=dict(state)
+        if marker is None: old.pop('wrench_origin_semantics')
+        else: old['wrench_origin_semantics']=marker
+        with pytest.raises(RuntimeError,match='wrench origin'):
+            head.load_state_dict(old,strict=False)
+
+
+def test_genesis_origin_conversion_uses_realized_com_for_both_variants():
+    from legged_gym.simulator.genesis_simulator_pact import GenesisSimulator_PACT
+    from legged_gym.simulator.genesis_simulator_pact_pos import GenesisSimulator_PACT_Pos
+    origin=torch.tensor([[[3.,4.,5.]]])
+    com=origin+torch.tensor([[[.1,0.,0.]]])
+    def positions(indices,ref):
+        assert indices == [2]
+        return com if ref=='link_com' else origin
+    sim=SimpleNamespace(_robot=SimpleNamespace(get_links_pos=positions),_base_link_index=2)
+    w=torch.tensor([[0.,0.,-50.,1.,2.,3.]])
+    for cls in (GenesisSimulator_PACT,GenesisSimulator_PACT_Pos):
+        result=cls.hard_pact_wrench_at_base_origin_world(sim,w)
+        torch.testing.assert_close(result,torch.tensor([[0.,0.,-50.,1.,7.,3.]]))
 
 
 @pytest.mark.parametrize('task_class',[Go2HardPACT,Go2HardPACTPos])

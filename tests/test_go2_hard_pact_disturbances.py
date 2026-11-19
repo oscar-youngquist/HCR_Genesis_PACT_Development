@@ -40,6 +40,9 @@ def _persistent_task(num_envs=1, progress=1.0, task_class=Go2HardPACT, config=No
     task.domain_rand_curriculum = HardPACTDomainRandCurriculum(task.cfg)
     task.domain_rand_curriculum.progress["disturbance"] = progress
     task.simulator = SimpleNamespace(domain_rand_disturbance_progress=progress)
+    # This minimal mock applies at the base origin; real backends expose the
+    # corresponding point-to-origin conversion, tested separately.
+    task.simulator.hard_pact_wrench_at_base_origin_world = lambda wrench: wrench
     task._persistent_wrench_target_world = torch.zeros(num_envs, 6)
     task._current_sustained_wrench_world = torch.zeros(num_envs, 6)
     task._persistent_component_active = torch.zeros(num_envs, 2, dtype=torch.bool)
@@ -318,6 +321,7 @@ class WrenchLabelTests(unittest.TestCase):
         task.obs_scales = SimpleNamespace(base_wrench=0.1)
         solver = _WrenchSolver()
         task.simulator = SimpleNamespace(
+            hard_pact_wrench_at_base_origin_world=lambda w: w,
             _robot=SimpleNamespace(
                 _solver=solver,
                 get_quat=lambda: torch.tensor([[1., 0., 0., 0.]]),

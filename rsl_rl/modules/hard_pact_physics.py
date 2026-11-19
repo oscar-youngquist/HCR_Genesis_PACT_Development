@@ -659,7 +659,7 @@ def _physics_head(input_dim, hidden_layers, output_dim):
 
 
 class DeploymentPhysicsHeads(nn.Module):
-    """Yaw-local interval-GRF and sustained-base-wrench predictors."""
+    """Yaw-local interval-GRF and base-origin applied-wrench predictors."""
 
     def __init__(
         self,
@@ -693,6 +693,9 @@ class DeploymentPhysicsHeads(nn.Module):
         self.register_buffer(
             "wrench_scale", torch.as_tensor(wrench_scale, dtype=torch.float32)
         )
+        # Semantic guard also covers raw model/weights-only loads, not just
+        # full training envelopes. Old point-wrench heads are not interchangeable.
+        self.register_buffer('wrench_origin_semantics', torch.tensor(3, dtype=torch.int64))
         self.register_buffer(
             "wrench_qp_clip",
             torch.as_tensor(wrench_qp_clip, dtype=torch.float32),
@@ -705,6 +708,12 @@ class DeploymentPhysicsHeads(nn.Module):
             raise ValueError("wrench_scale must contain 6 values")
         if self.wrench_qp_clip.shape != (6,):
             raise ValueError("wrench_qp_clip must contain 6 values")
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        marker = state_dict.get(prefix+'wrench_origin_semantics')
+        if marker is None or marker.numel() != 1 or int(marker) != 3:
+            raise RuntimeError('Incompatible HardPACT wrench origin: expected v3 applied wrench about base-link origin; old application-point heads require explicit retraining/migration, not a silent load')
+        return super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     def forward(self, latent_sample, explicit, nominal_torque):
         """Evaluate both heads from the reparameterized training sample.

@@ -37,9 +37,16 @@ Raw linear tracking uses existing all-environment/control-step scores before
 reward scaling. Each window computes a sample-weighted tracking mean and
 `sum(non-timeout, non-relocation resets) / sum(N * control_dt)`; repeated failures
 count as events, not unique environments. This is independent of TensorBoard
-reporting intervals and episode reward means. References only improve: maximum
-window tracking and minimum window failure rate. The gate requires tracking
->= ratio * reference and failures <= ratio * reference + absolute allowance.
+reporting intervals and episode reward means. Tracking follows the disturbance
+curriculum convention: per-valid-iteration EMA (alpha 0.05), a rolling 200-EMA
+history, and its 90th-percentile reference (sorted index floor(0.9*(n-1))).
+At completed windows the gate requires current EMA >= max(0.50, ratio * reference).
+These independent `intervention_tracking_ema_alpha`,
+`intervention_tracking_reference_window`, `intervention_tracking_reference_quantile`
+and `intervention_min_tracking` settings match the disturbance defaults; they do
+not change the disturbance curriculum. Old easier-domain tracking ages out.
+Failure reference remains the minimum historical window failure rate, requiring
+failures <= ratio * reference + absolute allowance.
 No yaw or plateau requirement. With a zero failure reference and zero allowance,
 only a zero-failure window passes. Missing/nonfinite/insufficient evidence
 invalidates the window and pauses progress; the gate otherwise stays fixed
@@ -47,14 +54,18 @@ between windows. Gate decisions apply only to subsequent iterations.
 
 Checkpoint state under `hard_pact_qp_curriculum.intervention` (also in the shared
 training envelope) includes progress, absolute timing, partial evidence, best
-references and the gate. Torch RNG restoration preserves subsequent group and
+references, EMA/history and the gate. Version-1 intervention states retain attained
+progress/timing and best failure reference, but recollect tracking evidence with
+the gate closed for a complete new window. Version-2 resumes preserve partial
+windows exactly. Torch RNG restoration preserves subsequent group and
 anchor sampling. A checkpoint lacking this state starts at two solves and
 collects a fresh complete window; iteration count never implies intervention
 progress. Physical Isaac Lab resume still starts fresh episodes, not exact
 PhysX continuation. Objective-weight scheduling is independent.
 
 `curriculum/intervention/*` logs progress, probabilities, expected mean solves
-(before integer rounding), gate/reason and completed-window means/references.
+(before integer rounding), gate/reason and completed-window means/references,
+plus `tracking_ema` and `tracking_threshold` (the actual tracking gate operands).
 Unavailable evidence is NaN, not a successful zero. Reason codes: 0 existing
 ramps, 1 settling, 2 insufficient evidence, 3 tracking, 4 failures, 5 open,
 6 complete. Metrics describe the rollout mixture and the decision for the next

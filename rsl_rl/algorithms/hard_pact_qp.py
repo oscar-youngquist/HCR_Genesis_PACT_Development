@@ -158,6 +158,10 @@ class HardPACTQPConfig:
     intervention_ramp_iterations: int = 4000
     intervention_window_iterations: int = 200
     intervention_tracking_ratio: float = .90
+    intervention_tracking_ema_alpha: float = .05
+    intervention_tracking_reference_window: int = 200
+    intervention_tracking_reference_quantile: float = .90
+    intervention_min_tracking: float = .50
     intervention_failure_ratio: float = 1.20
     intervention_failure_allowance: float = 0.0  # failures / simulated env-second
     # One canonical QP and fallback cascade can be solved by any registered

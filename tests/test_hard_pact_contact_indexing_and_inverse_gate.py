@@ -160,6 +160,15 @@ def _run_owned_update(qp_mode,device):
     )
     inverse_torques, rollout_torques, grf_torques, inverse_grfs = [], [], [], []
     inverse_wrenches = []
+    predict_wrench = alg.actor_critic.physics_estimator.predict_wrench
+    latest_base_wrench = []
+    wrench_chunk = [0]
+
+    def checked_wrench(*args, **kwargs):
+        predicted = predict_wrench(*args, **kwargs)
+        latest_base_wrench[:] = [alg.actor_critic.physics_estimator.wrench_to_physical(predicted).detach()]
+        wrench_chunk[0] = 0
+        return predicted
     actor_weights = [alg.actor_critic.act_pos_out.weight, alg.actor_critic.act_tau_out.weight]
     predict_grf = alg.actor_critic.physics_estimator.predict_grf
     replay_action_path = alg._replay_action_path
@@ -200,6 +209,12 @@ def _run_owned_update(qp_mode,device):
 
     def checked_loss(**kwargs):
         assert "mass_com_wrench_world" not in kwargs
+        # Identity base orientation in this fixture: v3 prediction is already
+        # the base-origin wrench, despite nonzero randomized CoM. No second r x F.
+        n = kwargs['total_wrench_world'].shape[0]
+        start = wrench_chunk[0]
+        torch.testing.assert_close(kwargs['total_wrench_world'],latest_base_wrench[0][start:start+n])
+        wrench_chunk[0] += n
         inverse_wrenches.append(kwargs["total_wrench_world"].detach().clone())
         inverse_torques.append(kwargs["interval_executed_torque"].detach().clone())
         inverse_grfs.append(kwargs["interval_grf_world"].detach().clone())
@@ -242,6 +257,7 @@ def _run_owned_update(qp_mode,device):
          patch("rsl_rl.algorithms.ppo_hard_pact.corrected_bard_inverse_dynamics_loss", side_effect=checked_loss), \
          patch("rsl_rl.algorithms.ppo_hard_pact.differentiable_bard_rollout_loss", side_effect=checked_rollout), \
          patch.object(alg.actor_critic.physics_estimator, "predict_grf", side_effect=checked_grf), \
+         patch.object(alg.actor_critic.physics_estimator, "predict_wrench", side_effect=checked_wrench), \
          patch("rsl_rl.algorithms.ppo_hard_pact.projection_loss", side_effect=checked_projection), \
          patch.object(alg, "_replay_action_path", side_effect=checked_replay):
         alg.update(lambda a: (a[:, :12], a[:, 12:]), lambda q, p, v: q-p-v,

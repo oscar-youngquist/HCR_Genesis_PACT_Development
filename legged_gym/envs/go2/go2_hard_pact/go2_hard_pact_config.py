@@ -146,15 +146,15 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         added_mass_min = -1.0
 
         randomize_com_displacement = True
-        com_displacement_x_min = 0.05
+        com_displacement_x_min = 0.075
         com_displacement_x_max = 0.15
 
-        com_displacement_y_min = 0.05
+        com_displacement_y_min = 0.075
         com_displacement_y_max = 0.15
 
         com_displacement_z_positive = True
         com_displacement_z_min_pos = 0.05
-        com_displacement_z_min = 0.05
+        com_displacement_z_min = 0.075
         com_displacement_z_max = 0.20
 
         randomize_ctrl_delay = True
@@ -368,7 +368,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
             torque_rate_limits = 0.0  # Substep-mean squared excess / (rate*physics_dt)^2; 0 disables.
             pd_target_torque_limit = 0.0
 
-            alive_bonus = 0.5
+            alive_bonus = 0.25
 
             dof_vel_stand_still = 0.0
             stand_still_contact = 0.5
@@ -591,8 +591,8 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         # Cosine 0->1 from QP activation, in absolute PPO iterations; 0 disables.
         # Scales actor projection/velocity/FK/load losses, not encoder/decoder PINNs.
         actor_physics_warmup_iterations = 1000
-        lambda_qp_velocity_xy = 0.1  # inherit lambda_projection; 0 disables
-        lambda_qp_velocity_yaw = 0.1  # independent nonnegative override
+        lambda_qp_velocity_xy = 0.30  # inherit lambda_projection; 0 disables
+        lambda_qp_velocity_yaw = 0.30  # independent nonnegative override
 
         profile_bard_timing = False
         # Optional actor-only losses; zero skips computation and FK storage.
@@ -603,7 +603,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             'fk_position_scale_m': 0.10,  # Body-relative XYZ normalization [m].
             'fk_deadband_m': 0.01,  # Per-coordinate zero-error band [m].
             
-            'lambda_load': 0.05,  # Direct nominal-FF Huber support supervision; existing actor warmup applies.
+            'lambda_load': 0.10,  # Direct nominal-FF Huber support supervision; existing actor warmup applies.
             'load_balance_relative_tolerance': 1e-5,  # Exact support balance relative numerical tolerance; no ridge.
             'load_balance_absolute_tolerance': 1e-6,  # Absolute tolerance after force/moment row normalization.
             'load_force_scale_n': 50.0,  # Allocation force-row scale [N].
@@ -636,10 +636,14 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             # first_plus_random_substep - First plus balanced later solve; every_substep=4, random_one_substep=1 per env/interval.
             'qp_update_mode': 'curriculum_substeps',         # Gated 2 -> 4 solves; random groups each interval, one uniform executed PPO anchor.
             'intervention_settling_iterations': 500,         # After BOTH correction and actor-physics ramps finish.
-            'intervention_ramp_iterations': 4000,            # Gate-open PPO iterations from two solves to every substep.
+            'intervention_ramp_iterations': 10000,            # Gate-open PPO iterations from two solves to every substep.
             'intervention_window_iterations': 200,          # Complete non-overlapping evidence windows; also required for baseline.
-            'intervention_tracking_ratio': 0.90,            # Minimum fraction of best raw linear-tracking window mean.
-            'intervention_failure_ratio': 1.10,              # Maximum multiple of best (lowest) window failure rate.
+            'intervention_tracking_ratio': 0.90,            # Recovery fraction of the rolling tracking-EMA quantile.
+            'intervention_tracking_ema_alpha': 0.05,         # Same tracking EMA convention as disturbance curriculum.
+            'intervention_tracking_reference_window': 200,  # Recent valid iteration EMAs; old easier-domain evidence ages out.
+            'intervention_tracking_reference_quantile': 0.90, # Rolling reference quantile, matching disturbance curriculum.
+            'intervention_min_tracking': 0.50,              # Absolute raw tracking floor, matching disturbance curriculum.
+            'intervention_failure_ratio': 1.20,              # Maximum multiple of best (lowest) window failure rate.
             'intervention_failure_allowance': 0.0,           # Additive failures / simulated environment-second near zero.
             'correction_ramp_enabled': True,                 # Blend accepted QP corrections into execution; full QP losses remain unchanged.
             'correction_ramp_start_offset': 0,             # Iterations after QP activation before the execution ramp starts.

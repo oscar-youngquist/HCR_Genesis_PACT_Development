@@ -213,6 +213,16 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
                 **options,
             )
 
+    def hard_pact_wrench_at_base_origin_world(self, wrench):
+        """Label-only equivalent of the applied load; never reapply this torque."""
+        from legged_gym.dynamics import wrench_at_point
+        domain_rand = getattr(getattr(self, '_cfg', None), 'domain_rand', None)
+        if not getattr(domain_rand, 'persistent_wrench_at_com', False):
+            return wrench
+        rotation = self._robot.data.body_link_quat_w[:, self._base_link_index][:, (1, 2, 3, 0)]
+        arm = quat_apply(rotation, self.hard_pact_wrench_application_offset_body())
+        return wrench_at_point(wrench, arm, torch.zeros_like(arm))
+
     def push_robots(self):
         """Apply independent planar, vertical, and angular velocity impulses.
 

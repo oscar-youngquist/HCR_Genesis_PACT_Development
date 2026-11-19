@@ -66,7 +66,6 @@ from rsl_rl.modules.hard_pact_physics import (
 from legged_gym.dynamics import (
     create_go2_dynamics,
     fixed_mechanics_forward_dynamics,
-    wrench_at_point,
 )
 from rsl_rl.hard_pact_ablations import resolve_hard_pact_features
 
@@ -2608,18 +2607,14 @@ class PPO_HardPACT:
         applied_at_base = None
         wrench_yaw = None
 
-        def world_wrench(q, wrench_prediction, com_shift):
+        def world_wrench(q, wrench_prediction):
             total = torch.cat((
                 _yaw_local_to_world(wrench_prediction[:, :3].unsqueeze(1), q[:, 3:7]).squeeze(1),
                 _yaw_local_to_world(wrench_prediction[:, 3:].unsqueeze(1), q[:, 3:7]).squeeze(1),
             ), dim=-1)
-            base = q[:, :3].detach()
-            com = base + _body_point_to_world(
-                com_shift.detach(), q.detach()
-            )
-            # Preserve the existing application-point -> base-origin moment shift.
-            # The prediction is applied loading, not an inertial-mismatch estimate.
-            return wrench_at_point(total, com, base)
+            # Prediction already contains the application-offset moment about
+            # the base origin. Rotate axes only; another r x F double-counts it.
+            return total
 
         def pinn_grf(torque):
             # Both PINNs may train the GRF decoder and its latent encoder,
@@ -2658,10 +2653,6 @@ class PPO_HardPACT:
                 )
                 applied_at_base = world_wrench(
                     batch["pre_q"], wrench_yaw,
-                    # New Isaac Lab CoM application includes the nominal offset,
-                    # not just its randomized displacement. Old replay retains
-                    # its existing convention when this optional field is absent.
-                    batch.get("wrench_application_offset_body", batch["realized_com_shift_body"]),
                 )
 
         # BARD uses logged interval-average executed torque as a constant;

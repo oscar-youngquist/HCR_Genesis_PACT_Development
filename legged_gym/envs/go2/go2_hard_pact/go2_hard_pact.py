@@ -23,7 +23,6 @@ from rsl_rl.algorithms.hard_pact_qp import (
     qp_substep_anchors,
     project_nominal_torque, qp_substep_mask,
 )
-from legged_gym.dynamics import wrench_at_point
 from legged_gym.envs.go2.go2_pact.go2_pact import Go2PACT
 from legged_gym.utils.math_utils import quat_rotate_inverse
 
@@ -1040,7 +1039,14 @@ class Go2HardPACT(Go2PACT):
         # This is the ramped/gated wrench actually passed to the simulator below.
         # Randomized inertia belongs in M/h, never in the external-wrench target.
         # Keep historical "total_*" field names and separate mass diagnostics.
-        total_wrench = self._current_sustained_wrench_world
+        # Decoder/QP convention: moment about the base-link Jacobian origin.
+        # Shift at EACH substep before temporal averaging/yaw conversion, using
+        # the actual application point. Keep the simulator command unshifted.
+        to_base = getattr(self.simulator, 'hard_pact_wrench_at_base_origin_world', None)
+        if to_base is None and getattr(self.cfg.domain_rand, 'persistent_wrench_at_com', False):
+            raise RuntimeError('CoM-applied HardPACT loads require a base-origin wrench label adapter')
+        total_wrench = (to_base(self._current_sustained_wrench_world) if to_base is not None
+                        else self._current_sustained_wrench_world)
         sustained_yaw_scaled = wrench_world_to_scaled_yaw_local(
             self._current_sustained_wrench_world,
             quat,

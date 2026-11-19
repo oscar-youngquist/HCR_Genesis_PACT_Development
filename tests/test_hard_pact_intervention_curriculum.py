@@ -16,7 +16,8 @@ from test_hard_pact_qp_modes import fixture
 def config(**kw):
     defaults = dict(qp_update_mode='curriculum_substeps', warmup_iterations=0,
                     correction_ramp_enabled=False, intervention_settling_iterations=0,
-                    intervention_ramp_iterations=10, intervention_window_iterations=2)
+                    intervention_ramp_iterations=10, intervention_window_iterations=2,
+                    intervention_tracking_ema_alpha=1., intervention_tracking_reference_window=4)
     return replace(HardPACTQPConfig(), **(defaults | kw))
 
 
@@ -52,7 +53,7 @@ def test_actual_ramps_settling_and_subsequent_iteration_snapshot():
     assert s.state_dict() == state
 
 
-def test_complete_baseline_even_without_settling_and_monotone_references():
+def test_complete_baseline_and_recent_tracking_with_monotone_failure_reference():
     s = InterventionCurriculum(config())
     finish(s,0)
     assert not s.gate and s.progress == 0
@@ -69,6 +70,53 @@ def test_complete_baseline_even_without_settling_and_monotone_references():
     finish(s,6,.9,failures=1)
     finish(s,7,.9,failures=1)
     assert not s.gate and s.reason == s.FAILURES and s.progress == progress
+
+
+def test_tracking_decline_ages_out_but_minimum_and_failure_gate_remain():
+    s = InterventionCurriculum(config())
+    for i in range(4): finish(s,i,.9)
+    for i in range(4,6): finish(s,i,.6)
+    assert not s.gate and s.reason == s.TRACKING
+    for i in range(6,8): finish(s,i,.6)
+    assert s.gate and s.tracking_reference == .6 and s.failure_reference == .1
+    for i in range(8,12): finish(s,i,.4)
+    assert s.tracking_threshold == .5 and not s.gate
+    for i in range(12,16): finish(s,i,.6,failures=2)
+    assert not s.gate and s.reason == s.FAILURES and s.failure_reference == .1
+
+
+def test_tracking_ema_quantile_matches_disturbance_convention():
+    s = InterventionCurriculum(config(intervention_tracking_ema_alpha=.05))
+    ema = None
+    history = []
+    for i, score in enumerate([.9,.8,.6,.6,.6,.7,.7,.7]):
+        finish(s,i,score)
+        ema = score if ema is None else .95*ema+.05*score
+        history = (history+[ema])[-4:]
+        assert s.tracking_ema == pytest.approx(ema)
+        if i % 2:
+            assert s.tracking_reference == sorted(history)[int(.9*(len(history)-1))]
+            assert s.gate == (ema >= max(.5,.9*s.tracking_reference))
+
+
+def test_v1_migration_keeps_progress_and_failure_reference_not_old_tracking():
+    original = InterventionCurriculum(config())
+    for i in range(5): finish(original,i)
+    old = original.state_dict()
+    old['version'] = 1
+    for key in ('tracking_ema_alpha','tracking_reference_window','tracking_reference_quantile',
+                'min_tracking','tracking_ema','tracking_history','tracking_threshold'):
+        old.pop(key)
+    restored = InterventionCurriculum(config())
+    restored.load_state_dict(old)
+    assert restored.progress == original.progress
+    assert restored.failure_reference == original.failure_reference
+    assert restored.last_iteration == original.last_iteration
+    assert not restored.gate and restored.tracking_reference is None
+    finish(restored,5,.6)
+    assert not restored.gate
+    finish(restored,6,.6)
+    assert restored.gate and restored.progress == original.progress
 
 
 def test_weighted_evidence_missing_window_and_absolute_allowance():

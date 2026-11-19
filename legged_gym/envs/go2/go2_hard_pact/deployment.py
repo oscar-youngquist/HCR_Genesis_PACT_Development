@@ -163,7 +163,7 @@ def build_deployment_contract(cfg, actor, gain_spec):
     swing_config = GRFSwingConfig.from_task(cfg)
     features = getattr(actor, 'hard_pact_features', None)
     contract = {
-        "schema_version": 17,
+        "schema_version": 18,
         "rss_features": (vars(features) if features is not None and features.variant_id.startswith('rss_') else None),
         "policy_action_mode": "position" if actor.std.numel() == 12 else "coupled",
         "policy_action_dimension": actor.std.numel(),
@@ -285,7 +285,7 @@ def build_deployment_contract(cfg, actor, gain_spec):
         },
         "frames_and_units": {
             "grf": {"frame": "yaw_local", "units": "N", "foot_order": list(FOOT_ORDER), "component_order": ["Fx", "Fy", "Fz"], "target": "deadbanded_clipped_control_interval_average"},
-            "base_wrench": {"frame": "yaw_local", "units": ["N", "N", "N", "Nm", "Nm", "Nm"], "order": list(WRENCH_ORDER), "target": "total_external_wrench_label", "target_semantics": "applied_external_only", "target_semantics_version": 2, "excludes": "randomized mass/CoM gravity; instantaneous velocity kicks"},
+            "base_wrench": {"frame": "yaw_local", "origin": "base_link_origin_at_base_jacobian", "units": ["N", "N", "N", "Nm", "Nm", "Nm"], "order": list(WRENCH_ORDER), "target": "total_external_wrench_label", "target_semantics": "applied_external_only", "target_semantics_version": 3, "moment": "applied_free_moment + (application_point-base_origin) cross force; shift each substep before averaging", "consumer": "rotate axes only; never add a second CoM moment", "excludes": "randomized mass/CoM gravity and inertia mismatch; instantaneous velocity kicks"},
         },
         "critic_observation_scales_independent_of_decoders": {
             "grf": float(cfg.normalization.obs_scales.grf),
@@ -388,8 +388,13 @@ def write_deployment_contract_once(log_dir, contract):
 
 def validate_qp_deployment_contract(contract):
     """Reject old held/active execution contracts rather than reinterpret them."""
-    if contract.get("schema_version") != 17:
-        raise ValueError("Incompatible HardPACT deployment schema; re-export using the current controller")
+    if contract.get("schema_version") != 18:
+        raise ValueError("Incompatible HardPACT deployment schema/wrench origin; old heads require explicit migration or retraining, not metadata-only re-export")
+    if 'frames_and_units' in contract:
+        wrench = contract['frames_and_units'].get('base_wrench', {})
+        if (wrench.get('target_semantics_version') != 3 or
+                wrench.get('origin') != 'base_link_origin_at_base_jacobian'):
+            raise ValueError('Incompatible HardPACT base-origin wrench semantics')
     update = contract.get("qp_update")
     if update is not None:
         if update.get("mode") not in ("every_substep", "random_one_substep", "first_plus_random_substep", "mixed_substeps", "curriculum_substeps") or update.get("formulation") != "masked_torque_force_24":
