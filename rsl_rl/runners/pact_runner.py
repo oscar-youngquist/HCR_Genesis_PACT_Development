@@ -612,6 +612,8 @@ class OnPolicyRunnerPACT:
             intervention = self.qp_curriculum.intervention
             if intervention is not None:
                 self.env._qp_intervention_probabilities = intervention.begin(iteration)
+                from rsl_rl.algorithms.hard_pact_qp_curriculum import extra_intervention_strength
+                self.env._qp_extra_strength = extra_intervention_strength(effective, intervention.snapshot_progress)
             self.env._qp_tracking_collect = effective.objective_curriculum_enabled or intervention is not None
             qp.diagnostics_scheduled = (qp.cfg.tensorboard_diagnostics_enabled
                 and qp.cfg.tensorboard_diagnostics_interval > 0

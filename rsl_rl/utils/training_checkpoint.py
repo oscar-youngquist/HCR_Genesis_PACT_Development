@@ -242,6 +242,9 @@ def validate(runner, data, operation='resume', *, learning_rate=None):
     if state is None: raise ValueError('Legacy partial checkpoint: use explicit allow_legacy or weights_only')
     if state['version'] != VERSION: raise ValueError('Unsupported training checkpoint version')
     current = contract(runner); saved = state['contract']
+    if adapter(runner) == 'hard_pact':
+        from rsl_rl.algorithms.hard_pact_intervention_curriculum import legacy_extra_strength_contract
+        saved = legacy_extra_strength_contract(saved,current)
     if (adapter(runner) == 'hard_pact'
             and not (state.get('qp_curriculum') or {}).get('intervention')):
         from rsl_rl.algorithms.hard_pact_intervention_curriculum import legacy_intervention_contract

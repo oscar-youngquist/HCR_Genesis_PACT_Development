@@ -7,8 +7,8 @@ No extra enable flag is needed. The default schedule is:
 
 ```python
 'qp_update_mode': 'curriculum_substeps',
-'intervention_settling_iterations': 200,
-'intervention_ramp_iterations': 4000,
+'intervention_settling_iterations': 500,
+'intervention_ramp_iterations': 8000,
 'intervention_window_iterations': 200,
 'intervention_tracking_ratio': 0.90,
 'intervention_failure_ratio': 1.20,
@@ -22,6 +22,50 @@ group sizes (ties prefer 2 then 3 then 4), randomly assigns environments, and
 draws distinct uniform later substeps, always including zero. Tiny batches
 therefore approximate the mixture to within one row per group. PPO uniformly
 preselects one scheduled solve before outcomes; its budget is unchanged.
+
+### Optional extra-intervention strength
+
+In `algorithm.hard_pact_qp`:
+
+```python
+'intervention_extra_strength_enabled': False,  # Opt in with True.
+'intervention_extra_strength_start': 0.25,     # Finite [0,1].
+```
+
+Only `curriculum_substeps` uses this option. Baseline solves are substep 0
+and the first entry in the sampler's existing random later ordering. Remaining
+selected solves use `alpha * (start + (1-start)*snapshot_progress)`; baseline
+solves retain `alpha`. No extra RNG draw, solve or schedule clock is introduced.
+Progress stays frozen throughout rollout/update. Prerequisite ramps and the
+500-iteration settling period remain unchanged. Full progress means strength
+one, preserving the subsequent disturbance-settling trigger.
+
+Accepted primary/recovery torques blend from the existing sanitized, optionally
+rate-projected nominal base. Fallbacks are unchanged; unsolved substeps use
+fresh nominal commands, not held corrections. Partial blends are not certified
+by the full candidate's certificate. Existing FF reconstruction remains intact.
+
+Enabled PPO replay stores one float alpha and one base-rate-clipping flag per
+anchor. Actor velocity losses use the current-policy blend, with acceleration
+`qdd_candidate + A_tau*(tau_blend-tau_candidate)`. `A_tau=M^-1 S^T` is reused
+from the existing primary/recovery assembly, so this requires no extra solve.
+Optimized forces/external wrench remain those of the full candidate; this is
+a model prediction, not measured execution. Actor-only routing is unchanged.
+Projection/recovery losses and their diagnostics still use the full candidate;
+representation PINNs still use measured executed torque. Disabled behavior is
+unchanged, including full-candidate actor velocity losses.
+
+Gated physical diagnostics include `execution/extra_strength` and
+`execution/{baseline,extra}_applied_correction_rms_nm` (coordinate RMS across
+accepted rows, count-weighted; empty groups unavailable). Configuration is
+saved in resolved/checkpoint/deployment solver settings. Older checkpoints
+default to disabled, including those already carrying intervention progress;
+an enabled destination is not silently accepted as an ordinary legacy resume.
+No new curriculum state is needed: saved snapshot progress determines strength.
+
+Focused checks: `python -m pytest -q tests/test_hard_pact_extra_strength.py
+tests/test_hard_pact_intervention_curriculum.py tests/test_hard_pact_qp_modes.py
+tests/test_hard_pact_disturbance_sequence.py` (use the existing cuPIQP environment).
 Unselected substeps use fresh nominal torque, never held corrections.
 
 Evidence collection starts after both existing ramps end. Correction ends at

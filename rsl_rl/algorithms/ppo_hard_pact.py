@@ -2924,9 +2924,23 @@ class PPO_HardPACT:
                     raise ValueError("QP tracking enabled but replay lacks sampled physical velocity commands")
                 qp_arguments.update(velocity_command=qp_batch["sampled_qp_velocity_command"].detach(),
                                     base_linear_velocity_world=sample_v[:,:3].detach())
+            execution_arguments = {}
+            if (self.qp_config.qp_update_mode == 'curriculum_substeps'
+                    and self.qp_config.intervention_extra_strength_enabled
+                    and (self.lambda_qp_velocity_xy>0 or self.lambda_qp_velocity_yaw>0)):
+                from .hard_pact_qp import project_nominal_torque
+                if 'sampled_qp_execution_alpha' not in qp_batch or 'sampled_qp_base_rate_clip' not in qp_batch:
+                    raise ValueError('Extra intervention strength requires captured replay alpha/base clipping')
+                limits = self.hard_pact_qp.torque_limits.to(sampled_nominal)
+                base = torch.nan_to_num(sampled_nominal).clamp(-limits,limits)
+                clipped = project_nominal_torque(sampled_nominal,qp_arguments['previous_torque'],
+                    limits,self.qp_config.torque_rate_limit_nm_s,sample_dt)
+                base = torch.where(qp_batch['sampled_qp_base_rate_clip'].bool(),clipped,base)
+                execution_arguments = dict(execution_base=base,
+                    execution_alpha=qp_batch['sampled_qp_execution_alpha'].detach())
             if differentiate_qp:
                 qp_result = self.hard_pact_qp.solve(
-                    differentiable=True, diagnostics_phase="ppo", **qp_arguments
+                    differentiable=True, diagnostics_phase="ppo", **execution_arguments, **qp_arguments
                 )
             else:
                 # stopgrad pays only for the required forward metric. It does
@@ -2936,7 +2950,7 @@ class PPO_HardPACT:
                         # RSS controls autograd separately from numerical mode:
                         # use the same PPO solver/tolerances/capacity as full.
                         differentiable=self.hard_pact_features.variant_id.startswith('rss_'),
-                        diagnostics_phase="ppo", **qp_arguments
+                        diagnostics_phase="ppo", **execution_arguments, **qp_arguments
                     )
             # m_physics=not(push or reset or timeout or teleport). Sustained
             # wrench and randomized-mass transitions deliberately remain valid.
@@ -3062,9 +3076,13 @@ class PPO_HardPACT:
                         cfg.lambda_load*load,qp_feedforward,self.ppo_parameters)
             if self.lambda_qp_velocity_xy>0 or self.lambda_qp_velocity_yaw>0:
                 accepted = qp_result.differentiated_mask | qp_result.recovery_mask
+                velocity_qdd = qp_result.qdd
+                if (self.qp_config.qp_update_mode == 'curriculum_substeps'
+                        and self.qp_config.intervention_extra_strength_enabled):
+                    velocity_qdd = qp_result.execution_qdd
                 physical_metrics={}
                 xy,yaw,count = self.hard_pact_qp.velocity_tracking_losses(
-                    qp_result.qdd,qp_arguments,valid,accepted,physical_metrics=physical_metrics)
+                    velocity_qdd,qp_arguments,valid,accepted,physical_metrics=physical_metrics)
                 for name,value in physical_metrics.items():
                     self._record_actor_loss(name+('/error_m_s' if name=='velocity_xy' else '/error_rad_s'),value,count)
                 self._record_actor_loss('velocity_xy', xy, count)

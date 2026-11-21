@@ -1210,6 +1210,12 @@ class Go2HardPACT(Go2PACT):
                 from rsl_rl.algorithms.hard_pact_qp_curriculum import execution_torque
                 base = safe[rows]
                 alpha = getattr(self, "_qp_execution_alpha", 1.0)
+                extra_enabled = (qp.cfg.qp_update_mode == 'curriculum_substeps'
+                                 and qp.cfg.intervention_extra_strength_enabled)
+                if extra_enabled:
+                    baseline = (self._qp_baseline_selection[rows] & (1 << self._qp_substep)) != 0
+                    strength = getattr(self, '_qp_extra_strength', qp.cfg.intervention_extra_strength_start)
+                    alpha = torch.where(baseline, base.new_tensor(alpha), base.new_tensor(alpha*strength))
                 accepted = result.differentiated_mask | result.recovery_mask
                 executed = execution_torque(base, result.tau_safe, accepted, alpha)
                 safe[rows] = executed
@@ -1218,7 +1224,12 @@ class Go2HardPACT(Go2PACT):
                     aggregate.add_sum("execution/candidate_correction_abs_sum_nm", (result.tau_safe-base).abs().sum())
                     aggregate.add_sum("execution/executed_correction_abs_sum_nm", (executed-base).abs().sum())
                     aggregate.add_sum("execution/correction_coordinates", base.new_tensor(base.numel()))
-                    aggregate.add_sum("execution/partially_corrected_rows", accepted.sum()*int(alpha < 1))
+                    aggregate.add_sum("execution/partially_corrected_rows", (accepted & (alpha < 1)).sum())
+                    if extra_enabled and qp._physical_enabled():
+                        aggregate.add_values('execution/extra_strength',base.new_tensor(strength))
+                        for name, mask in (('baseline',baseline),('extra',~baseline)):
+                            aggregate.add_values('execution/'+name+'_applied_correction_squared_nm2',
+                                (executed-base).square().mean(-1),accepted & mask)
                 certified[rows] = result.differentiated_mask & (alpha == 1.0)
                 zeros = tau_nom.new_zeros(rows.numel())
                 residual = torch.stack((result.diagnostics["selected/equality_max"],
@@ -1236,6 +1247,8 @@ class Go2HardPACT(Go2PACT):
                 local = (self._qp_sampled_substep_index[rows].long()==self._qp_substep).nonzero(as_tuple=True)[0]
                 dest = rows[local]
                 sample = self._qp_sampled_transition
+                if extra_enabled:
+                    sample['sampled_qp_execution_alpha'][dest] = alpha[local,None]
                 if getattr(self, '_cache_qp_replay_mechanics', False):
                     from rsl_rl.algorithms.hard_pact_qp_mechanics_cache import copy_mechanics
                     copy_mechanics(sample, context, dest, local)
@@ -1357,10 +1370,16 @@ class Go2HardPACT(Go2PACT):
             self._hard_pact_rollout_qp.cfg, "qp_update_mode", "every_substep"
         )
         qp_substep_anchors(update_mode, decimation)  # validates exactly four substeps
-        self._qp_rollout_substep_index, self._qp_sampled_substep_index = qp_interval_selection(
+        extra_enabled = (update_mode == 'curriculum_substeps'
+                         and self._hard_pact_rollout_qp.cfg.intervention_extra_strength_enabled)
+        selection = qp_interval_selection(
             update_mode, self.num_envs, decimation, self.device,
             shared_later=getattr(self._hard_pact_rollout_qp.cfg,"qp_shared_later_substep",False),
-            intervention_probabilities=getattr(self, '_qp_intervention_probabilities', (1.,0.,0.)))
+            intervention_probabilities=getattr(self, '_qp_intervention_probabilities', (1.,0.,0.)),
+            return_baseline=extra_enabled)
+        self._qp_rollout_substep_index, self._qp_sampled_substep_index = selection[:2]
+        if extra_enabled:
+            self._qp_baseline_selection = selection[2]
         aggregate = getattr(self._hard_pact_rollout_qp, "iteration_diagnostics", {}).get("rollout")
         if aggregate is not None:
             aggregate.add_sum("environment_control_intervals", torch.tensor(self.num_envs,device=self.device))
@@ -1409,6 +1428,11 @@ class Go2HardPACT(Go2PACT):
 
         }
 
+        if extra_enabled:
+            self._qp_sampled_transition['sampled_qp_execution_alpha'] = shape(1)
+            self._qp_sampled_transition['sampled_qp_base_rate_clip'] = torch.full(
+                (self.num_envs,1),bool(getattr(self.cfg.control,'clip_torque_rate_without_qp',False)),
+                device=self.device,dtype=torch.bool)
         if getattr(self, '_cache_qp_replay_mechanics', False):
             from rsl_rl.algorithms.hard_pact_qp_mechanics_cache import allocate_mechanics, PREFIX
             cache = getattr(self, '_qp_replay_mechanics_buffers', None)

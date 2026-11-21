@@ -8,6 +8,21 @@ import math
 from copy import deepcopy
 
 
+def legacy_extra_strength_contract(saved, current):
+    """Only fill absent strength fields with legacy DISABLED defaults."""
+    if not isinstance(saved,dict) or not isinstance(current,dict):
+        return deepcopy(saved)
+    result=deepcopy(saved)
+    if 'qp_update_mode' in saved:
+        for key,value in (('intervention_extra_strength_enabled',False),
+                          ('intervention_extra_strength_start',.25)):
+            if key in current: result.setdefault(key,value)
+    for key in saved.keys() & current.keys():
+        if isinstance(saved[key],dict) and isinstance(current[key],dict):
+            result[key]=legacy_extra_strength_contract(saved[key],current[key])
+    return result
+
+
 def legacy_intervention_contract(saved, current):
     """Narrow migration for checkpoints predating this schedule.
 
@@ -18,6 +33,10 @@ def legacy_intervention_contract(saved, current):
     if not isinstance(saved, dict) or not isinstance(current, dict):
         return deepcopy(saved)
     result = deepcopy(saved)
+    # Missing fields mean DISABLED, never copy an enabled destination setting.
+    if 'qp_update_mode' in saved:
+        result.setdefault('intervention_extra_strength_enabled', False)
+        result.setdefault('intervention_extra_strength_start', .25)
     # v1 had a lifetime-best tracking reference. Only add the new gate settings;
     # retain strict validation of all previously present numerical settings.
     if 'qp_update_mode' in saved and 'intervention_tracking_ema_alpha' not in saved:
@@ -28,7 +47,7 @@ def legacy_intervention_contract(saved, current):
     modes = ('every_substep', 'random_one_substep', 'first_plus_random_substep', 'mixed_substeps')
     if 'qp_update_mode' in saved and not any(k.startswith('intervention_') for k in saved):
         for k, v in current.items():
-            if k.startswith('intervention_'):
+            if k.startswith('intervention_') and not k.startswith('intervention_extra_strength_'):
                 result[k] = deepcopy(v)
         if current.get('qp_update_mode') == 'curriculum_substeps' and saved['qp_update_mode'] in modes:
             result['qp_update_mode'] = 'curriculum_substeps'

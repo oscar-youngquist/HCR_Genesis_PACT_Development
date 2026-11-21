@@ -12,10 +12,35 @@ def execution_torque(base, candidate, accepted, alpha):
     A blended command is NOT certified by the candidate's certificate. Endpoint
     branches avoid roundoff and preserve recovery's intentionally softened rate.
     """
+    if torch.is_tensor(alpha):
+        alpha = alpha.detach().to(base).reshape(-1,1)
+        blended = torch.where(alpha == 0, base,
+                    torch.where(alpha == 1, candidate, base + alpha*(candidate-base)))
+        return torch.where(accepted[:,None], blended, candidate)
     if alpha == 1.0:
         return candidate
     blended = base if alpha == 0.0 else base + alpha * (candidate - base)
     return torch.where(accepted[:, None], blended, candidate)
+
+
+def extra_intervention_strength(cfg, snapshot_progress):
+    if cfg.qp_update_mode != 'curriculum_substeps' or not cfg.intervention_extra_strength_enabled:
+        return 1.
+    return cfg.intervention_extra_strength_start + (1-cfg.intervention_extra_strength_start)*snapshot_progress
+
+
+def blended_candidate_acceleration(qdd, candidate, base, alpha, torque_map, valid):
+    """Same optimized forces/wrench; change only total torque at the replay state.
+
+    M^-1 S^T (tau_exec-tau_candidate) is NOT alpha*qdd. Filter failed rows
+    before arithmetic. Reuse the assembly's M^-1 S^T; no additional solve.
+    """
+    rows = valid.reshape(-1).bool().nonzero(as_tuple=True)[0]
+    torque = execution_torque(base[rows],candidate[rows],
+                             torch.ones_like(rows,dtype=torch.bool),alpha[rows])
+    delta = torque-candidate[rows]
+    change = (torque_map[rows].detach().to(delta) @ delta[...,None]).squeeze(-1)
+    return qdd.new_zeros(qdd.shape).index_copy(0,rows,qdd[rows]+change)
 
 
 class QPCurriculum:

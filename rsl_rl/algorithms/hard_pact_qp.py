@@ -44,7 +44,7 @@ def qp_substep_mask(mode, substep, selected):
 
 
 def qp_interval_selection(mode, num_envs, decimation, device, *, generator=None, shared_later=False,
-                          intervention_probabilities=(1., 0., 0.)):
+                          intervention_probabilities=(1., 0., 0.), return_baseline=False):
     """Return rollout selection and one replay anchor, before any solver result.
 
     In first-plus-random mode the rollout index is the later solve (k>0).
@@ -82,15 +82,16 @@ def qp_interval_selection(mode, num_envs, decimation, device, *, generator=None,
         # Uniform among this row's executed solves, independent of acceptance.
         scores = torch.rand(num_envs, 4, device=device, generator=generator)
         replay = scores.masked_fill(~masks, float('inf')).argmin(dim=1)
-        return selected, replay
+        return (selected, replay, 1 + (1 << later[:,0])) if return_baseline else (selected, replay)
     if mode == "first_plus_random_substep":
         later = (torch.randint(1,decimation,(1,),device=device,generator=generator).expand(num_envs)
                  if shared_later else
                  1 + balanced_substep_indices(num_envs, decimation-1, device, generator=generator))
         use_later = torch.randint(2, (num_envs,), device=device, generator=generator).bool()
-        return later, torch.where(use_later, later, torch.zeros_like(later))
+        replay = torch.where(use_later, later, torch.zeros_like(later))
+        return (later, replay, 1 + (1 << later)) if return_baseline else (later, replay)
     selected = balanced_substep_indices(num_envs, decimation, device, generator=generator)
-    return selected, selected
+    return (selected, selected, None) if return_baseline else (selected, selected)
 
 
 def project_torque_interval(torque, lower, upper):
@@ -156,6 +157,8 @@ class HardPACTQPConfig:
     qp_update_mode: str = "random_one_substep"
     intervention_settling_iterations: int = 200
     intervention_ramp_iterations: int = 4000
+    intervention_extra_strength_enabled: bool = False
+    intervention_extra_strength_start: float = .25
     intervention_window_iterations: int = 200
     intervention_tracking_ratio: float = .90
     intervention_tracking_ema_alpha: float = .05
@@ -310,6 +313,9 @@ class HardPACTQPConfig:
         return cls(**dict(values))
 
     def __post_init__(self):
+        import math
+        if not math.isfinite(self.intervention_extra_strength_start) or not 0 <= self.intervention_extra_strength_start <= 1:
+            raise ValueError('intervention_extra_strength_start must be finite and in [0,1]')
         if self.cupiqp_primary_bucket_policy not in ('tight','power_of_two','exact'):
             raise ValueError('Unknown cuPIQP primary bucket policy')
         if self.cupiqp_bucket_alignment < 1 or int(self.cupiqp_bucket_alignment)!=self.cupiqp_bucket_alignment:
@@ -340,6 +346,7 @@ class HardPACTQPResult:
     recovery_mask: torch.Tensor | None = None  # Certified softened, NOT hard-joint certified.
     recovery_slack: torch.Tensor | None = None  # [B,12], rad/s²; differentiable in PPO.
     recovery_rate_slack: torch.Tensor | None = None  # [B,12], Nm; not a torque-limit relaxation.
+    execution_qdd: torch.Tensor | None = None  # Optional replay blend, NOT full-candidate certification.
 
 
 @dataclass
@@ -1229,7 +1236,8 @@ class HardPACTDifferentiableQP:
             constant_hessian=False)
 
     def solve(self, *, differentiable=None, diagnostics_phase=None,
-              environment_ids=None, substep_index=None, environment_count=None, **data):
+              environment_ids=None, substep_index=None, environment_count=None,
+              execution_base=None, execution_alpha=None, **data):
         """Hard QP, optional soft-joint recovery, then actuator/rate projection.
 
         A fixed stance mask eliminates physical swing forces without equality
@@ -1254,7 +1262,8 @@ class HardPACTDifferentiableQP:
             with torch.no_grad():
                 return self.solve(differentiable=False, diagnostics_phase=diagnostics_phase,
                     environment_ids=environment_ids,substep_index=substep_index,
-                    environment_count=environment_count,**data)
+                    environment_count=environment_count,execution_base=execution_base,
+                    execution_alpha=execution_alpha,**data)
         dtype = self._solve_dtype(reference)
         # Objective weights change numeric Q/p, not structure or solver settings.
         # Every backend updates Q/p each solve; keep safe existing pool leases.
@@ -1315,6 +1324,14 @@ class HardPACTDifferentiableQP:
         primal = primal + sum(torch.nan_to_num(values[k],nan=0.,posinf=0.,neginf=0.).sum()*0
                               for k in ("tau_nom","force_pred_world","wrench_pred_world"))
         qdd = ref.new_zeros(n,18)
+        execution_qdd = None
+        if execution_base is not None:
+            if execution_alpha is None:
+                raise ValueError('Replay execution base requires captured alpha')
+            from .hard_pact_qp_curriculum import blended_candidate_acceleration
+            execution_base = execution_base.to(ref)
+            execution_alpha = execution_alpha.detach().to(ref)
+            execution_qdd = ref.new_zeros(n,18)
         ok = torch.zeros(n,device=ref.device,dtype=torch.bool)
         finite_input = torch.stack([torch.isfinite(v).reshape(n,-1).all(-1)
                                     for k,v in values.items() if not k.startswith('diagnostic_') and (rate_enabled or k!='previous_torque')]).all(0) & (dt[:,0]>0)
@@ -1433,6 +1450,10 @@ class HardPACTDifferentiableQP:
             x = _CertifiedRows.apply(torch.nan_to_num(x,nan=0.,posinf=0.,neginf=0.),accepted)
             primal = primal.index_copy(0,rows,torch.where(accepted[:,None],x,primal[rows]))
             derived = (m.acceleration_map @ x[...,None]).squeeze(-1)+m.acceleration_offset
+            if execution_qdd is not None:
+                blended = blended_candidate_acceleration(derived,x[:,:12],execution_base[rows],
+                    execution_alpha[rows],m.acceleration_map[:,:,:12],accepted)
+                execution_qdd = execution_qdd.index_copy(0,rows,blended)
             if self._compact_diagnostics_enabled():
                 _,ql,qu,vl=self._limits(ref)
                 aggregate.compact_candidate("primary",m,raw_candidate,{k:v[rows] for k,v in values.items()},
@@ -1520,6 +1541,10 @@ class HardPACTDifferentiableQP:
                         if rate_enabled:
                             recovery_rate_slack = recovery_rate_slack.index_copy(0,rows,torch.where(accepted[:,None],x[:,36:48],torch.zeros_like(x[:,36:48])))
                         a = (m.acceleration_map@x[...,None]).squeeze(-1)+m.acceleration_offset
+                        if execution_qdd is not None:
+                            blended = blended_candidate_acceleration(a,x[:,:12],execution_base[rows],
+                                execution_alpha[rows],m.acceleration_map[:,:,:12],accepted)
+                            execution_qdd = execution_qdd.index_copy(0,rows,blended)
                         if self._compact_diagnostics_enabled():
                             _,ql,qu,vl=self._limits(ref)
                             aggregate.compact_candidate("recovery",m,raw_candidate,{k:v[rows] for k,v in values.items()},
@@ -1557,7 +1582,8 @@ class HardPACTDifferentiableQP:
         result = HardPACTQPResult(qdd.to(reference.dtype),
             primal[:,12:].reshape(n,4,3).to(reference.dtype),
             primal[:,:12].to(reference.dtype),stage,ok,diag,metrics,
-            soft_ok,recovery_slack.to(reference.dtype),recovery_rate_slack.to(reference.dtype))
+            soft_ok,recovery_slack.to(reference.dtype),recovery_rate_slack.to(reference.dtype),
+            None if execution_qdd is None else execution_qdd.to(reference.dtype))
         self.iteration_diagnostics[self._diagnostics_phase].add_result(result,gradients_enabled)
         return result
 

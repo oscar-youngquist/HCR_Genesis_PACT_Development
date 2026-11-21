@@ -644,6 +644,8 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             'qp_update_mode': 'curriculum_substeps',         # Gated 2 -> 4 solves; random groups each interval, one uniform executed PPO anchor.
             'intervention_settling_iterations': 500,         # After BOTH correction and actor-physics ramps finish.
             'intervention_ramp_iterations': 8000,             # Gate-open PPO iterations from two solves to every substep.
+            'intervention_extra_strength_enabled': True,   # Only additional curriculum solves ramp execution strength.
+            'intervention_extra_strength_start': 0.25,       # Extra-solve multiplier at progress zero; reaches 1 at completion.
             'intervention_window_iterations': 200,          # Complete non-overlapping evidence windows; also required for baseline.
             'intervention_tracking_ratio': 0.90,            # Recovery fraction of the rolling tracking-EMA quantile.
             'intervention_tracking_ema_alpha': 0.05,         # Same tracking EMA convention as disturbance curriculum.
