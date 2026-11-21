@@ -25,6 +25,10 @@ from legged_gym.envs import task_registry
 
 def cfg():
     value = copy.deepcopy(GO2HardPACTCfg())
+    # Exercise the legacy independent three-phase scheduler explicitly.
+    value.domain_rand.disturbance_sequence_enabled = False
+    value.domain_rand.use_joint_dynamics_curriculum = True
+    value.domain_rand.use_mass_com_curriculum = True
     value.domain_rand.push_warmup = 0
     value.domain_rand.step_interval = 1
     value.domain_rand.min_reward_to_step = -1.0

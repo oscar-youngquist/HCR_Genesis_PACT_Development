@@ -336,7 +336,7 @@ def clear_gate_evidence(state):
         recovery_counter=0, streak=0, command_streak=0, threshold=None, advanced=False,
         baseline_frozen=False, tracking_reference=None, failure_reference=None,
         tracking_mean=None, tracking_ema=None, tracking_history=[], tracking_threshold=None,
-        failure_rate=None, gate=False, window_start=None,
+        failure_rate=None, failure_threshold=None, gate=False, window_start=None,
         window_iterations=0, tracking_sum=0., tracking_count=0., failures=0., exposure=0.,
         window_valid=True)
     if isinstance(state, dict):

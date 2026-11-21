@@ -713,9 +713,9 @@ class Go2HardPACT(Go2PACT):
         for key,value in state["ranges"].items():
             self.command_ranges[key] = list(value)
 
-    def step_domain_rand_curriculum(self, iteration, mean_reward=None):
+    def step_domain_rand_curriculum(self, iteration, mean_reward=None, **evidence):
         """Advance once per PPO iteration and update backend reset ranges."""
-        changed = self.domain_rand_curriculum.advance(iteration, mean_reward)
+        changed = self.domain_rand_curriculum.advance(iteration, mean_reward, **evidence)
         self._apply_domain_rand_curriculum_state()
         self._refresh_domain_rand_capability_report()
         return changed

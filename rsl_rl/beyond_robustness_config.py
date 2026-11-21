@@ -209,6 +209,7 @@ def resolve_beyond_robustness(env_cfg=None, train_cfg=None, *, environment_overr
     if overrides.get('domain_rand.persistent_disturbance',False):
         raise ValueError('BR uses physical payloads instead of persistent external wrenches')
     cfg.domain_rand.persistent_disturbance=False
+    cfg.domain_rand.disturbance_sequence_enabled=False  # No HardPACT QP-ramp dependency.
     dt=cfg.control.dt; decimation=cfg.control.decimation
     if not math.isfinite(dt) or dt<=0 or not isinstance(decimation,int) or decimation<1:
         raise ValueError('Invalid control dt/decimation')

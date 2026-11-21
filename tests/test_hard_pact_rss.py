@@ -162,6 +162,8 @@ def test_channel_losses_are_actor_only_and_do_not_require_qp(variant):
         seen.append(a[2].clone());assert not torch.is_grad_enabled()
         return compensation_demand(*a,**kw)
     raw_wrench=torch.zeros(3,6);raw_wrench[:,2]=-.2
+    batch.update(total_external_wrench_label_world=raw_wrench.clone(),
+                 realized_added_mass=torch.zeros(3,1),realized_com_shift_body=torch.zeros(3,3))
     replay=dict(desired_position=pos,feedforward_torque=ff)
     with patch('rsl_rl.algorithms.ppo_hard_pact.nominal_support_gravity',return_value=g), \
          patch('rsl_rl.algorithms.ppo_hard_pact.compensation_demand',side_effect=demand), \
@@ -207,6 +209,7 @@ def test_tiny_real_ppo_update(variant):
         control_torque_limits=z(12)+23.5,
         actor_fk_stance=torch.ones(steps,n,4,dtype=torch.bool),actor_fk_next_feet_body=torch.zeros(steps,n,4,3),
         total_external_wrench_label_yaw_normalized=z(6),sustained_wrench_active_mask=z(1).bool(),
+        total_external_wrench_label_world=z(6),realized_added_mass=z(1),realized_com_shift_body=z(3),
         **{k:z(1).bool() for k in ('push_event_mask','reset_mask','timeout_mask','teleport_mask')})
     s.hard_pact_fields=fields
     J,B,W,g,stance=allocation_inputs()

@@ -337,7 +337,9 @@ class OnPolicyRunnerPACT:
             )
             self._rollout_disturbance_metric_count = 0
             intervention = getattr(getattr(self, 'qp_curriculum', None), 'intervention', None)
-            if intervention is not None:
+            disturbance_sequence = getattr(getattr(self.env, 'domain_rand_curriculum', None), 'sequence', None)
+            collect_failures = intervention is not None or disturbance_sequence is not None
+            if collect_failures:
                 intervention_failures = torch.zeros((), device=self.device)
                 intervention_exposure = 0.
             # Rollout
@@ -359,7 +361,7 @@ class OnPolicyRunnerPACT:
                     # Submit the predicted action and extract the resulting state... 
                     obs, privileged_obs, obs_hist, exp_labels, rewards, dones, infos, grfs = self.env.step(actions)  # obs_t+1  (obs_t)
                     self._accumulate_rollout_qp_metrics(infos)
-                    if intervention is not None:
+                    if collect_failures:
                         # Count each actual transition once, not reset summaries
                         # accumulated over a different logging interval.
                         timeouts = infos.get('time_outs', self.env.time_out_buf)
@@ -445,7 +447,7 @@ class OnPolicyRunnerPACT:
                 self.env.step_reward_curriculum(it)
             
             # Step the domain randomization if approperiate
-            if self.env.simulator.use_domainrand_curriculum:
+            if self.env.simulator.use_domainrand_curriculum and not self.is_hard_pact:
                 # self.env.simulator._step_domian_rand(it)
                 mean_tracking_lin_vel = None
 
@@ -460,18 +462,7 @@ class OnPolicyRunnerPACT:
                 # mean_reward = statistics.mean(rewbuffer) if len(rewbuffer) > 0 else None
                 if not self.is_hard_pact and len(ep_infos) > 0 and "rew_tracking_lin_vel" in ep_infos[0] and vals:
                     mean_tracking_lin_vel = torch.stack(vals).mean().item()
-                if self.is_hard_pact and hasattr(
-                    self.env, "step_domain_rand_curriculum"
-                ):
-                    # Same raw, rollout-weighted evidence as QP objectives.
-                    # The legacy DR scheduler treats None as permission to
-                    # advance, so do not invoke it without finite evidence.
-                    if locomotion_score is not None:
-                        self.env.step_domain_rand_curriculum(it, locomotion_score)
-                else:
-                    self.env.simulator._step_domian_rand(
-                        it, mean_tracking_lin_vel
-                    )
+                self.env.simulator._step_domian_rand(it, mean_tracking_lin_vel)
 
                 if self.env.simulator.domain_rand_reward_ema is not None:
                     self.writer.add_scalar('Values/domain_rand_reward_ema',self.env.simulator.domain_rand_reward_ema,it) 
@@ -530,17 +521,36 @@ class OnPolicyRunnerPACT:
                 torch.cuda.synchronize(self.device)
             stop = time.time()
             learn_time = stop - start
+            failure_count = intervention_failures.item() if collect_failures else None
             if self.is_hard_pact and hasattr(self, "qp_curriculum"):
                 self.qp_curriculum.finish(it, locomotion_score, locomotion_count)
                 if intervention is not None:
                     intervention.finish(it, locomotion_score, locomotion_count,
-                                        intervention_failures.item(), intervention_exposure)
+                                        failure_count, intervention_exposure)
                     if self.writer is not None:
                         for key, value in intervention.metrics().items():
                             self.writer.add_scalar('curriculum/intervention/'+key, value, it)
                 if self.writer is not None:
                     for key, value in self.qp_curriculum.metrics().items():
                         self.writer.add_scalar("curriculum/qp/"+key, value, it)
+            if self.is_hard_pact and self.env.simulator.use_domainrand_curriculum:
+                if disturbance_sequence is not None or locomotion_score is not None:
+                    self.env.step_domain_rand_curriculum(it, locomotion_score,
+                        qp_complete=self._disturbance_qp_complete(it), tracking_count=locomotion_count,
+                        failures=failure_count, exposure=intervention_exposure if collect_failures else None)
+                cfg = self.alg.qp_config
+                interval = max(1, cfg.tensorboard_diagnostics_interval)
+                if self.writer is not None and cfg.tensorboard_diagnostics_enabled and it % interval == 0:
+                    curriculum = self.env.domain_rand_curriculum
+                    metrics = {} if disturbance_sequence is None else disturbance_sequence.metrics(it)
+                    metrics.update(progress=curriculum.progress['disturbance'], tracking_ema=curriculum.reward_ema)
+                    metrics['phase'] = (*curriculum.phases, 'complete').index(curriculum.phase)
+                    for axis in 'xyz':
+                        low, high = curriculum.effective_ranges()['base_com_'+axis]
+                        metrics['com_'+axis+'_min_m'], metrics['com_'+axis+'_max_m'] = low, high
+                    for key, value in metrics.items():
+                        if value is not None:
+                            self.writer.add_scalar('curriculum/disturbance/'+key, value, it)
             if self.is_hard_pact and self.alg.hard_pact_qp is not None:
                 qp = self.alg.hard_pact_qp
                 for phase,seconds in (("rollout",collection_time),("ppo",learn_time)):
@@ -568,6 +578,21 @@ class OnPolicyRunnerPACT:
         self.env.shutdown_asynic_pino_workers()
         if self.is_hard_pact and hasattr(self.alg.physics_dynamics, "shutdown"):
             self.alg.physics_dynamics.shutdown()
+
+    def _disturbance_qp_complete(self, iteration):
+        """No-QP comparisons settle immediately; QP modes wait for actual ramps."""
+        if not self.hard_pact_features.execution_qp:
+            return True
+        schedule = getattr(self, 'qp_curriculum', None)
+        if schedule is None:
+            return False
+        if schedule.intervention is not None:
+            return schedule.intervention.progress >= 1.0
+        cfg = schedule.cfg
+        correction_end = (schedule.origin + cfg.correction_ramp_duration
+                          if cfg.correction_ramp_enabled else cfg.warmup_iterations)
+        actor_end = cfg.warmup_iterations + self.alg.actor_physics_warmup_iterations
+        return iteration >= max(correction_end, actor_end)
 
     def _set_hard_pact_qp_iteration(self, iteration):
         """Set both rollout and PPO gates before collecting this iteration."""

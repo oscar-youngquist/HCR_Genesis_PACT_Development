@@ -124,6 +124,7 @@ def _run_owned_update(qp_mode,device):
         # A stale/invalid diagnostic must not enter either applied-wrench PINN.
         "equivalent_mass_com_wrench_world": torch.full_like(zeros(6), float("nan")),
         "total_external_wrench_label_yaw_normalized": zeros(6),
+        "total_external_wrench_label_world": zeros(6),
         "sustained_wrench_active_mask": zeros(1).bool(),
         **{name: zeros(1).bool() for name in ("push_event_mask", "reset_mask", "timeout_mask", "teleport_mask")},
     }

@@ -2051,7 +2051,7 @@ class PPO_HardPACT:
         Eligibility is physics-valid + delay-source-valid + feasible stance
         support, NOT QP acceptance/activation. Targets are entirely detached;
         only nominal physical FF and actor-owned weights receive derivatives.
-        Original estimated W is retained even for the QP-wrench ablation.
+        Applied base-origin W is retained even for the QP-wrench ablation.
         """
         cfg = self.actor_regularizers
         q, v = batch['pre_q'].detach(), batch['pre_v'].detach()
@@ -2066,17 +2066,18 @@ class PPO_HardPACT:
             safe_q = torch.where(valid[:, None], q, torch.zeros_like(q))
             safe_q[:, 6] = torch.where(valid, safe_q[:, 6], torch.ones_like(safe_q[:, 6]))  # canonical xyzw
             safe_v = torch.where(valid[:, None], v, torch.zeros_like(v))
-            wy = self.actor_critic.physics_estimator.wrench_to_qp_physical(
-                self.actor_critic.physics_estimator.predict_wrench(latent.detach(), explicit.detach()))
-            wrench = torch.cat((_yaw_local_to_world(wy[:, :3, None].transpose(1, 2), safe_q[:, 3:7]).squeeze(1),
-                                _yaw_local_to_world(wy[:, 3:, None].transpose(1, 2), safe_q[:, 3:7]).squeeze(1)), -1)
+            # Supervised target uses actual applied loading, already about the
+            # base origin. Do not clip it with the deployment-QP wrench limits.
+            wrench = batch['total_external_wrench_label_world'].detach()
             demands, feasibility = [], []
             # Bounded mechanics workspace; no solver or autograd graph.
             capacity = min(self.qp_config.ppo_chunk_size, self.physics_dynamics.batch_capacity)
             for start in range(0, q.shape[0], capacity):
                 sl = slice(start, start + capacity)
                 ctx = self.physics_dynamics.build_context(safe_q[sl], safe_v[sl], parameters={}, need_jacobians=True)
-                gravity = nominal_support_gravity(self.physics_dynamics, safe_q[sl])
+                gravity = nominal_support_gravity(self.physics_dynamics, safe_q[sl], parameters={
+                    'added_base_mass': batch['realized_added_mass'][sl],
+                    'base_com_shift': batch['realized_com_shift_body'][sl]})
                 demand, feasible = compensation_demand(ctx.foot_jacobians, ctx.base_jacobian,
                     wrench[sl], gravity, stance[sl], cfg, self.qp_config.friction_coefficient)
                 demands.append(demand); feasibility.append(feasible)
@@ -3036,14 +3037,15 @@ class PPO_HardPACT:
                 stance=sample_contact_probability.detach()>=self.hard_pact_qp.cfg.contact_threshold
                 ff_gain=qp_batch['control_motor_strength'].detach()*qp_batch['control_feedforward_weight'].detach()
                 load_valid &= ((ff_gain!=0).expand(-1,12)|~stance.repeat_interleave(3,dim=-1)).all(-1)
-                # g(q), not velocity-dependent bias h. Nominal inertias avoid
-                # counting payload mass again: its load is already in W.
-                # W/contact predictions change with policy updates, so targets
-                # are deliberately recomputed, never cached across PPO epochs.
-                gravity=nominal_support_gravity(self.physics_dynamics,sample_q)
+                # Realized ROBOT gravity + applied external loading: distinct
+                # contributions. No desired acceleration or passive-spring target.
+                # Recompute: contact predictions/geometry may change across epochs.
+                gravity=nominal_support_gravity(self.physics_dynamics,sample_q,parameters={
+                    'added_base_mass': qp_batch['realized_added_mass'],
+                    'base_com_shift': qp_batch['realized_com_shift_body']})
                 target_metrics={} if self._actor_regularizer_diagnostics_due else None
                 demand,feasible=compensation_demand(sampled_mechanics.foot_jacobians,
-                    sampled_mechanics.base_jacobian,sample_applied,
+                    sampled_mechanics.base_jacobian,qp_batch['total_external_wrench_label_world'].detach(),
                     gravity,stance,cfg,self.hard_pact_qp.cfg.friction_coefficient,
                     diagnostics=target_metrics)
                 _,_,physical_ff,_=requested_torque_components(qp_desired_position,

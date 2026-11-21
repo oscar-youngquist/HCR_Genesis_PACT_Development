@@ -65,21 +65,30 @@ def fk_consistency_loss(predicted, target, stance, valid, cfg):
 
 
 @torch.no_grad()
-def nominal_support_gravity(dynamics, q):
-    """Nominal g(q)=RNEA(q,0,0), never h(q,v), payload, or passive springs.
+def nominal_support_gravity(dynamics, q, parameters=None):
+    """g(q)=RNEA(q,0,0), nominal by default, or realized robot mass/CoM.
+
+    Only inertial parameters are accepted: no external payload (already W),
+    desired acceleration, velocity bias or passive springs in this target.
 
     Use the existing backend conversion/model, bounded by its batch capacity.
     Pinocchio's existing worker boundary synchronizes; BARD stays on device.
     Results are owned because backend workspaces are mutable.
     """
     values=[]
+    parameters = {} if parameters is None else parameters
+    if set(parameters) - {'added_base_mass', 'base_com_shift'}:
+        raise ValueError('Support gravity accepts only robot mass/CoM parameters')
     for first in range(0,q.shape[0],dynamics.batch_capacity):
         state=q[first:first+dynamics.batch_capacity].detach()
         valid=torch.isfinite(state).all(-1)&(state[:,3:7].square().sum(-1)>0)
-        safe=torch.zeros_like(state);safe[:,3]=1  # simulator WXYZ identity
+        params = {k:v[first:first+dynamics.batch_capacity].detach() for k,v in parameters.items()}
+        for value in params.values(): valid &= torch.isfinite(value).reshape(state.shape[0],-1).all(-1)
+        params = {k:torch.where(valid[:,None],v,0.) for k,v in params.items()}
+        safe=torch.zeros_like(state);safe[:,6]=1  # canonical simulator XYZW identity
         state=torch.where(valid[:,None],state,safe)
         zero=state.new_zeros(state.shape[0],18)
-        context=dynamics.build_context(state,zero,parameters={},need_jacobians=False)
+        context=dynamics.build_context(state,zero,parameters=params,need_jacobians=False)
         result=context.rnea(zero).detach().clone()
         values.append(torch.where(valid[:,None],result,float('nan')))
     return torch.cat(values)

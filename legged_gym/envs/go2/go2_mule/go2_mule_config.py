@@ -260,6 +260,7 @@ def resolve_go2_mule(env_cfg=None, train_cfg=None, *, environment_overrides=None
     if overrides.get('domain_rand.persistent_disturbance',False):
         raise ValueError('MULE rolling stage uses real payloads, not persistent torso wrenches')
     cfg.domain_rand.persistent_disturbance=False
+    cfg.domain_rand.disturbance_sequence_enabled=False  # Preserve MULE's physical payload trigger.
     if 'sim.physx.gpu_found_lost_pairs_capacity' not in overrides:
         cfg.sim.physx.gpu_found_lost_pairs_capacity=max(cfg.sim.physx.gpu_found_lost_pairs_capacity,
             1 << max(0,(1024*cfg.env.num_envs-1).bit_length()))

@@ -146,16 +146,16 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         added_mass_min = -1.0
 
         randomize_com_displacement = True
-        com_displacement_x_min = 0.075
-        com_displacement_x_max = 0.15
+        com_displacement_x_min = 0.05
+        com_displacement_x_max = 0.05
 
-        com_displacement_y_min = 0.075
-        com_displacement_y_max = 0.15
+        com_displacement_y_min = 0.05
+        com_displacement_y_max = 0.05
 
         com_displacement_z_positive = True
-        com_displacement_z_min_pos = 0.05
-        com_displacement_z_min = 0.075
-        com_displacement_z_max = 0.20
+        com_displacement_z_min_pos = 0.0
+        com_displacement_z_min = 0.05
+        com_displacement_z_max = 0.05
 
         randomize_ctrl_delay = True
         ctrl_delay_step_range = [0, 1]
@@ -190,12 +190,19 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         min_reward_to_step = 0.50
         joint_dynamics_progress_delta = 0.02
         mass_com_progress_delta = 0.01
-        disturbance_progress_delta = 0.01
+        disturbance_progress_delta = 0.005
         use_joint_dynamics_curriculum = False
-        use_mass_com_curriculum = True
+        use_mass_com_curriculum = False
         use_disturbance_curriculum = True
         # Disabled sub-curricula: True uses final bounds; False uses initial bounds.
         disabled_curriculum_use_final_bounds = True
+        # HardPACT only: BR/MULE explicitly retain their payload curriculum triggers.
+        disturbance_sequence_enabled = True
+        disturbance_settling_iterations = 1000  # After actual substep-ramp completion (or immediately for no-QP variants).
+        disturbance_gate_window_iterations = 200
+        disturbance_gate_min_env_seconds = 1000.0
+        disturbance_survival_ratio = 1.20  # Relative to best completed-window failures/env-second; lower is better.
+        disturbance_failure_allowance = 0.0
 
         persistent_disturbance = True
         persistent_wrench_at_com = True  # Isaac Lab: force at randomized torso CoM; torque about that point.
@@ -636,14 +643,14 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             # first_plus_random_substep - First plus balanced later solve; every_substep=4, random_one_substep=1 per env/interval.
             'qp_update_mode': 'curriculum_substeps',         # Gated 2 -> 4 solves; random groups each interval, one uniform executed PPO anchor.
             'intervention_settling_iterations': 500,         # After BOTH correction and actor-physics ramps finish.
-            'intervention_ramp_iterations': 10000,            # Gate-open PPO iterations from two solves to every substep.
+            'intervention_ramp_iterations': 8000,             # Gate-open PPO iterations from two solves to every substep.
             'intervention_window_iterations': 200,          # Complete non-overlapping evidence windows; also required for baseline.
             'intervention_tracking_ratio': 0.90,            # Recovery fraction of the rolling tracking-EMA quantile.
             'intervention_tracking_ema_alpha': 0.05,         # Same tracking EMA convention as disturbance curriculum.
             'intervention_tracking_reference_window': 200,  # Recent valid iteration EMAs; old easier-domain evidence ages out.
             'intervention_tracking_reference_quantile': 0.90, # Rolling reference quantile, matching disturbance curriculum.
             'intervention_min_tracking': 0.50,              # Absolute raw tracking floor, matching disturbance curriculum.
-            'intervention_failure_ratio': 1.20,              # Maximum multiple of best (lowest) window failure rate.
+            'intervention_failure_ratio': 1.30,              # Maximum multiple of best (lowest) window failure rate.
             'intervention_failure_allowance': 0.0,           # Additive failures / simulated environment-second near zero.
             'correction_ramp_enabled': True,                 # Blend accepted QP corrections into execution; full QP losses remain unchanged.
             'correction_ramp_start_offset': 0,             # Iterations after QP activation before the execution ramp starts.

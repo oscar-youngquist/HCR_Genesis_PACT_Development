@@ -157,6 +157,26 @@ def test_nominal_gravity_is_not_velocity_bias():
     assert not gravity.requires_grad
 
 
+def test_realized_support_gravity_bard_mass_com_and_nominal_qp_isolation():
+    from legged_gym.dynamics import BardGo2Dynamics
+    from rsl_rl.algorithms.hard_pact_actor_regularizers import nominal_support_gravity
+    dynamics=BardGo2Dynamics('resources/robots/go2/urdf/go2.urdf',dtype=torch.float64,batch_capacity=3)
+    q=torch.zeros(3,19,dtype=torch.float64);q[:,6]=1
+    q[:,7:]=torch.tensor([0.,.8,-1.5]*4)
+    v=torch.zeros(3,18,dtype=q.dtype)
+    params={'added_base_mass':torch.tensor([[0.],[1.],[1.]],dtype=q.dtype),
+            'base_com_shift':torch.tensor([[0.,0.,0.],[0.,0.,0.],[.05,-.05,.05]],dtype=q.dtype)}
+    before=dynamics.build_context(q,v,parameters={},need_jacobians=True,need_qp=True)
+    M,h=before.mass_matrix.clone(),before.bias.clone()
+    gravity=nominal_support_gravity(dynamics,q,params)
+    torch.testing.assert_close(gravity[1,2]-gravity[0,2],q.new_tensor(9.81),atol=1e-5,rtol=1e-5)
+    assert gravity[2,3:5].sub(gravity[1,3:5]).abs().min() > .1
+    after=dynamics.build_context(q,v,parameters={},need_jacobians=True,need_qp=True)
+    torch.testing.assert_close(after.mass_matrix,M)
+    torch.testing.assert_close(after.bias,h)
+    assert not gravity.requires_grad
+
+
 def test_bard_fk_matches_finite_difference_in_canonical_order():
     from legged_gym.dynamics import BardGo2Dynamics
     dynamics=BardGo2Dynamics('resources/robots/go2/urdf/go2.urdf',dtype=torch.float64,batch_capacity=2)
