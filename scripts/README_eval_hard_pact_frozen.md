@@ -1,5 +1,163 @@
 # Frozen Isaac Lab HardPACT controller evaluation
 
+## Targeted attitude / diagnostic recovery probe (evaluation only)
+
+```bash
+conda activate lr_lab_cupiqp
+export SIMULATOR=isaaclab PYTHONPATH="$PWD"
+python -m pytest -q tests/test_hard_pact_recovery_probe.py tests/test_eval_hard_pact_tradeoff.py
+python scripts/eval_hard_pact_tradeoff.py --attitude-probe --seeds 1 --steps 24 \
+  --variants attitude050_probe --output diagnostics/attitude_probe11000/smoke
+python scripts/eval_hard_pact_tradeoff.py --attitude-probe --seeds 1 --steps 2000 \
+  --output diagnostics/attitude_probe11000/full
+python scripts/report_hard_pact_tradeoff.py diagnostics/attitude_probe11000/full
+```
+
+Physical GPU 1, ten environments, sequential workers. This mode resolves the
+checkpoint **from** `diagnostics/tradeoff11000/full/protocol.json`, verifies its
+hash, and does not select a newer checkpoint. Four conditions cross attitude
+weights 0.5/0.1 with normal/probe termination; stance=0.25 and torque=20.
+Assembly weights, immutable network hashes, saved schedule probabilities and
+per-row execution strengths are recorded. No training/optimizer runs occur.
+
+The previous failures select stairs-down levels 4/5 (three environments),
+stairs-up levels 2/7 (three), and discrete-obstacle levels 5/7/8/9 (four).
+Saved terrain rows are sampled within these cells, using unchanged training
+geometry. Thus this is **targeted exposure**, not the overall training terrain
+distribution. Identical initial scenario hashes are checked; trajectories and
+later randomization necessarily diverge after asynchronous resets.
+
+`--probe-extension 0.2`, `--probe-confirmation 0.5`, and `--capture-cap 24`
+configure diagnostic continuation. An original, debounced geometry failure
+starts one latched event only if contact/safety/timeout does not already require
+reset. Contact or nonfinite state terminates a live probe immediately. Failure
+to return inside the original geometry thresholds within 200 ms, or relapse
+during confirmation, is a delayed failure. Remaining continuously inside for
+500 ms is recovery; either outcome resets that environment. Timeouts/terrain
+relocation and unfinished end-of-evaluation probes are unresolved. Durations
+are rounded up to control steps. Production termination code is untouched.
+
+Use **`comparison.csv`, `terrain_comparison.csv`, and `summary.json`'s `probe`
+and `ordinary_diagnostics` fields**, not legacy top-level summaries (which
+include continuation). Original failure events are counted once; ordinary
+exposure excludes probe tails, and ordinary tracking additionally excludes
+original reset intervals. Recovery fraction uses all started probes, including
+unresolved events in its denominator. A delayed reset is not improved survival.
+Overlapping reasons describe observed threshold violations, not root causes.
+
+`probe_histories.npz` keeps at most the configured number of events, each with
+at least 0.5 seconds before the original decision (one extra control interval,
+truncated at previous reset) plus its
+continuation. Same-clock non-failure controls are retained when available.
+Aggregate counts include uncaptured events. Four physics samples correspond to
+each control observation; post-step measurements precede any reset. Solver
+accelerations are full-candidate model predictions, not measured acceleration.
+World angular x/y norms equal yaw-local horizontal norms; the logged desired
+world vector's vertical component is **not** an attitude-objective target.
+Stance acceleration is world-frame, swing entries unavailable. Terrain height
+and slip reference samples are control-rate cached. Contact transition timings
+use simulator processed contacts, not ideal instantaneous contact truth.
+
+Event plots and `event_timing.csv` align to the original failure decision, which
+may lag initial deterioration because of production debouncing. A crossing at
+the beginning of capture is left-censored. Temporal association cannot identify
+whether a QP correction caused deterioration or responded to it. One seed is
+preliminary evidence, with correlated environments/time samples.
+
+Executed collection: `diagnostics/attitude_probe11000/full` (seed 1, ten envs,
+2,000 control steps each, physical GPU 1). Nine focused tests passed. All four
+initial contracts matched; actor weights stayed unchanged. Actual assembly
+weights were `(stance, torque, attitude)=(0.25,20,0.5 or 0.1)`. Normal/probe
+executed torques matched exactly through 507/1,529 steps before the first
+eligible event. The 24-step GPU smoke also completed.
+
+| Attitude / termination | Original failures / ordinary env-s | RMSE vx / vy / yaw | Correction RMS / max [Nm] |
+|---|---|---|---|
+| 0.5 normal | 12 / 400 | .241 / .260 / .199 | 2.972 / 44.003 |
+| 0.1 normal | 6 / 400 | .188 / .228 / .165 | 2.321 / 33.243 |
+| 0.5 probe | 6 / 399.60 | .192 / .214 / .169 | 2.450 / 33.609 |
+| 0.1 probe | 6 / 399.94 | .187 / .223 / .161 | 2.296 / 33.243 |
+
+There were **zero recovered events**: two 0.5-probe failures after 200 ms and
+one 0.1-probe failure stopped by contact after 60 ms. No unresolved events;
+confirmation tracking is unavailable because none reached confirmation.
+All 74,000 scheduled QP rows per trial accepted primary solutions; no recovery
+or fallback solves occurred. Measured torque-magnitude exceedance was zero.
+Thirty original events were captured across the four trials, without cap drops.
+Collection took 409.5–416.5 seconds/trial. PyTorch allocator peak was 114.8 MiB;
+sampled total GPU occupancy was approximately 4.7 GiB including simulator and
+non-PyTorch allocations. These are simulator/capture timings, not deployment
+latency. Another training process occupied GPU 0/shared host resources.
+
+Lower attitude weight is a promising follow-up, not a validated training
+recommendation from one seed. Stair-up failures did not improve in the normal
+comparison. The reduced total in the 0.5 probe is not evidence of recovery:
+delayed resets changed subsequent trajectories/randomization. Event plots show
+large corrections around already developing roll excursions; temporal
+association does not identify causality. No production defaults were changed.
+
+## Saved-schedule tracking/survival objective sweep
+
+`eval_hard_pact_tradeoff.py` is an opt-in evaluation extension. It locates the
+exact `events.out.tfevents.1795231251.CICSUNIX-US-003.2659464.0` run and snapshots
+its latest checkpoint identity on first invocation. It creates **no optimizer**.
+All workers use physical GPU 1 (`CUDA_VISIBLE_DEVICES=1`, logical `cuda:0`) and
+run sequentially. Production files/settings are not modified.
+
+```bash
+conda activate lr_lab_cupiqp
+export SIMULATOR=isaaclab PYTHONPATH="$PWD"
+# Tiny forward-only simulator check:
+python scripts/eval_hard_pact_tradeoff.py \
+  --output diagnostics/tradeoff11000/smoke_new --steps 8 --seeds 1 --variants saved
+# All four objectives, three seeds, 40 seconds/environment:
+python scripts/eval_hard_pact_tradeoff.py \
+  --output diagnostics/tradeoff11000/full --steps 2000 --seeds 1 2 3 \
+  --checkpoint logs/hardpact_iclr/go2_hard_pact_rss_full/Nov20_22-20-49_hard_pact_rss_full_isaaclab/model_11000.pt
+python scripts/report_hard_pact_tradeoff.py diagnostics/tradeoff11000/full
+```
+
+This extension retains the saved terrain generator and samples ten level/type
+pairs from the saved 4,096-environment joint distribution. Promotions are frozen;
+native heading, command/reset, actuator-randomization and disturbance protocols
+remain active at saved curriculum difficulty. Sampling/strength/objective
+curricula never advance. The saved snapshot has mixture approximately
+`(0.1125, 0.1125, 0.775)` for 2/3/4 solves, baseline alpha 1 and extra alpha
+0.915625. Deterministic deployment inference and held control-rate predictions
+are retained. Objective overrides are applied after resolving saved schedules.
+
+Each trial saves a manifest with saved/resolved settings and initial-state hash,
+strict JSON results, and a bounded (2,000-step maximum) detached numeric trace.
+No graphs or solver factors are stored. `bounded_histories.npz` retains at most
+12 one-second pre-failure windows plus six controls; windows do not cross resets.
+`summary.json`, `comparison.csv`, `paired.json`, and PNGs are generated offline.
+Ordinary tracking excludes reset intervals. Paired one-second windows exclude
+any reset in either condition and report coverage; states after earlier resets
+are **not** identical despite a shared seed. Three seeds are descriptive evidence,
+not independent environment/time samples for significance testing.
+
+Accepted-candidate residual/cost comparisons use production physical scales.
+They exclude unsolved/rejected rows. Actual corrections use final executed torque;
+full-QP candidate predictions are kept separate. Missing floating samples are
+NaN internally and unavailable summaries are JSON null, not successful zeros.
+Measured next-substep differences use fresh body-frame velocity/orientation.
+Height-label/slip diagnostics use existing control-rate cached measurements;
+wrench error describes the QP-clamped reference rather than the unclipped decoder.
+Force labels are processed simulator contacts, not instantaneous hardware truth.
+These limitations are recorded in the offline report.
+
+Timing excludes the first 100 steps for steady-state collection but includes
+evaluation diagnostics. PyTorch allocated/reserved memory excludes PhysX/CuPy;
+`gpu1_telemetry.csv`, when collected, measures total device memory/utilization.
+Neither is hardware deployment latency. Completed trials can be skipped on
+relaunch; interrupted trials restart from their seed, not exact PhysX state.
+
+Forward-only validation:
+```bash
+SIMULATOR=isaaclab CUDA_VISIBLE_DEVICES='' PYTHONPATH=. python -m pytest -q \
+  tests/test_eval_hard_pact_tradeoff.py --tb=short
+```
+
 `eval_hard_pact_frozen.py` compares an unchanged checkpoint under pre-QP control,
 analytic projection, every-substep QP, and single-anchor QP. It creates no
 optimizer and runs no backward pass. Default evaluation

@@ -1,5 +1,53 @@
 # Mixed and First Plus Random Substep QP
 
+## Execution correction cap (current experiment)
+
+In `algorithm.hard_pact_qp`:
+
+```python
+'attitude_weight': 0.1,
+'contact_acceleration_weight': 0.1,
+'attitude_weight_initial': 0.1,
+'contact_acceleration_weight_initial': 0.1,
+'execution_correction_clip_enabled': True,
+'execution_correction_hip_limit_nm': 12.0,
+'execution_correction_thigh_limit_nm': 12.0,
+'execution_correction_calf_limit_nm': 18.0,
+```
+
+The component weights are authoritative final targets; no deprecated final
+override is needed. Outer actor/PINN coefficients and ramp durations are unchanged.
+The cap applies to accepted primary/recovery commands AFTER execution/extra alpha:
+`tau_exec = actuator_clamp(base + clamp(alpha*(tau_qp-base), -L, L))`.
+Limits are resolved by canonical FR/FL/RR/RL joint names and cached per device/dtype.
+All quantities are physical Nm, after actuator scaling and before feedforward
+reconstruction. Failed-solve fallback and unsolved substeps are unchanged.
+
+Rollout/play share the execution helper. PPO stores anchor alpha and the baseline
+rate-clipping flag, reconstructs the current-policy baseline and uses the same cap
+with ordinary clamp derivatives. Full QP candidate/projection/slack losses remain
+uncapped. No extra solves or constraints. Execution acceleration reuses the cached
+dynamics torque map; a changed command has no candidate joint/endpoint certificate.
+
+Aggregate execution logs include clipped accepted-row fraction, requested/applied
+correction mean/max in Nm, and finite denominators. Scheduled `physical`/`full`
+profiles add `sampled_health/execution_primary` and `execution_recovery` original
+joint-limit predictions, plus endpoint-torque exceedance. Their accepted/rejected
+labels refer to the SOURCE candidate, not certification of postprocessed commands.
+These are model predictions, not measured guarantees.
+
+Missing legacy flags mean disabled; strict checkpoint contracts reject silently
+enabling the cap or changing weights on ordinary resume. Captures retain exact
+execution baseline/alpha and configs; deployment metadata documents the operation.
+
+Focused checks (no training):
+
+```bash
+SIMULATOR=isaaclab CUDA_VISIBLE_DEVICES=1 PYTHONPATH=. python -m pytest -q \
+  tests/test_hard_pact_execution_cap.py tests/test_hard_pact_intervention_curriculum.py \
+  tests/test_hard_pact_extra_strength.py tests/test_hard_pact_qp_curriculum.py
+```
+
 ## Performance-gated intervention curriculum (active Go2 configuration)
 
 Select `qp_update_mode='curriculum_substeps'` in `algorithm.hard_pact_qp`.
@@ -10,8 +58,9 @@ No extra enable flag is needed. The default schedule is:
 'intervention_settling_iterations': 500,
 'intervention_ramp_iterations': 8000,
 'intervention_window_iterations': 200,
+'intervention_gate_check_interval': 5,  # Any positive integer, e.g. 2.
 'intervention_tracking_ratio': 0.90,
-'intervention_failure_ratio': 1.20,
+'intervention_failure_ratio': 1.30,
 'intervention_failure_allowance': 0.0,  # events / simulated environment-second
 ```
 
@@ -84,24 +133,33 @@ count as events, not unique environments. This is independent of TensorBoard
 reporting intervals and episode reward means. Tracking follows the disturbance
 curriculum convention: per-valid-iteration EMA (alpha 0.05), a rolling 200-EMA
 history, and its 90th-percentile reference (sorted index floor(0.9*(n-1))).
-At completed windows the gate requires current EMA >= max(0.50, ratio * reference).
+Every five completed iterations (configurable), the gate uses the latest 200
+consecutive valid iterations and requires current EMA >= max(0.50, ratio * reference).
+The rolling evidence is NOT cleared at checks. Duplicate iteration callbacks
+are ignored; missing/nonfinite evidence closes the gate and requires a new full
+consecutive window. Failure rate is the ratio of summed counts to summed
+simulated exposure, not the mean of individual rates or TensorBoard totals.
 These independent `intervention_tracking_ema_alpha`,
 `intervention_tracking_reference_window`, `intervention_tracking_reference_quantile`
 and `intervention_min_tracking` settings match the disturbance defaults; they do
 not change the disturbance curriculum. Old easier-domain tracking ages out.
-Failure reference remains the minimum historical window failure rate, requiring
+Failure reference remains the minimum historical **non-overlapping 200-iteration**
+window failure rate: frequent rolling checks cannot independently tighten it. It requires
 failures <= ratio * reference + absolute allowance.
 No yaw or plateau requirement. With a zero failure reference and zero allowance,
 only a zero-failure window passes. Missing/nonfinite/insufficient evidence
 invalidates the window and pauses progress; the gate otherwise stays fixed
-between windows. Gate decisions apply only to subsequent iterations.
+between checks. Gate decisions apply only to subsequent iterations. Progress still
+advances once per gate-open iteration, not once per check.
 
 Checkpoint state under `hard_pact_qp_curriculum.intervention` (also in the shared
 training envelope) includes progress, absolute timing, partial evidence, best
 references, EMA/history and the gate. Version-1 intervention states retain attained
 progress/timing and best failure reference, but recollect tracking evidence with
-the gate closed for a complete new window. Version-2 resumes preserve partial
-windows exactly. Torch RNG restoration preserves subsequent group and
+the gate closed for a complete new window. Version-2 states retain progress and
+references but recollect missing per-iteration rolling evidence. Version-3 states
+preserve the buffer, disjoint reference accumulators and check timing exactly.
+Torch RNG restoration preserves subsequent group and
 anchor sampling. A checkpoint lacking this state starts at two solves and
 collects a fresh complete window; iteration count never implies intervention
 progress. Physical Isaac Lab resume still starts fresh episodes, not exact
@@ -110,6 +168,7 @@ PhysX continuation. Objective-weight scheduling is independent.
 `curriculum/intervention/*` logs progress, probabilities, expected mean solves
 (before integer rounding), gate/reason and completed-window means/references,
 plus `tracking_ema` and `tracking_threshold` (the actual tracking gate operands).
+`window_ready`, `window_iterations`, and `gate_checks` expose evidence/check cadence.
 Unavailable evidence is NaN, not a successful zero. Reason codes: 0 existing
 ramps, 1 settling, 2 insufficient evidence, 3 tracking, 4 failures, 5 open,
 6 complete. Metrics describe the rollout mixture and the decision for the next

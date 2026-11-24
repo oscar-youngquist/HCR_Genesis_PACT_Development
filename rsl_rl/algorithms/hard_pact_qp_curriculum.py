@@ -6,12 +6,29 @@ import math
 import torch
 
 
-def execution_torque(base, candidate, accepted, alpha):
+def correction_limits_for_joints(names, cfg):
+    """Physical Nm, resolved by canonical joint NAME rather than array stride."""
+    limits = {kind:getattr(cfg,'execution_correction_'+kind+'_limit_nm') for kind in ('hip','thigh','calf')}
+    if any(not math.isfinite(v) or v <= 0 for v in limits.values()):
+        raise ValueError('Execution correction limits must be finite and positive')
+    canonical = {f'{leg}_{kind}_joint':value for leg in ('FR','FL','RR','RL') for kind,value in limits.items()}
+    if len(set(names))!=len(names) or any(name not in canonical for name in names):
+        raise ValueError('Unknown/duplicate canonical correction joint names')
+    return [canonical[name] for name in names]
+
+
+def execution_torque(base, candidate, accepted, alpha, correction_limits=None, torque_limits=None):
     """Blend accepted total commands only; rejected candidates are fallbacks.
 
     A blended command is NOT certified by the candidate's certificate. Endpoint
     branches avoid roundoff and preserve recovery's intentionally softened rate.
     """
+    if correction_limits is not None:
+        if torque_limits is None:raise ValueError('Capped execution requires actuator limits')
+        if torch.is_tensor(alpha):alpha=alpha.detach().to(base).reshape(-1,1)
+        delta = (alpha*(candidate-base)).clamp(-correction_limits,correction_limits)
+        blended = (base+delta).clamp(-torque_limits,torque_limits)
+        return torch.where(accepted[:,None],blended,candidate)
     if torch.is_tensor(alpha):
         alpha = alpha.detach().to(base).reshape(-1,1)
         blended = torch.where(alpha == 0, base,
@@ -29,7 +46,8 @@ def extra_intervention_strength(cfg, snapshot_progress):
     return cfg.intervention_extra_strength_start + (1-cfg.intervention_extra_strength_start)*snapshot_progress
 
 
-def blended_candidate_acceleration(qdd, candidate, base, alpha, torque_map, valid):
+def blended_candidate_acceleration(qdd, candidate, base, alpha, torque_map, valid,
+                                   correction_limits=None, torque_limits=None):
     """Same optimized forces/wrench; change only total torque at the replay state.
 
     M^-1 S^T (tau_exec-tau_candidate) is NOT alpha*qdd. Filter failed rows
@@ -37,7 +55,7 @@ def blended_candidate_acceleration(qdd, candidate, base, alpha, torque_map, vali
     """
     rows = valid.reshape(-1).bool().nonzero(as_tuple=True)[0]
     torque = execution_torque(base[rows],candidate[rows],
-                             torch.ones_like(rows,dtype=torch.bool),alpha[rows])
+                             torch.ones_like(rows,dtype=torch.bool),alpha[rows],correction_limits,torque_limits)
     delta = torque-candidate[rows]
     change = (torque_map[rows].detach().to(delta) @ delta[...,None]).squeeze(-1)
     return qdd.new_zeros(qdd.shape).index_copy(0,rows,qdd[rows]+change)

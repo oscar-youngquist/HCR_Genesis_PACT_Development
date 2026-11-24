@@ -646,20 +646,25 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             'intervention_ramp_iterations': 8000,             # Gate-open PPO iterations from two solves to every substep.
             'intervention_extra_strength_enabled': True,   # Only additional curriculum solves ramp execution strength.
             'intervention_extra_strength_start': 0.25,       # Extra-solve multiplier at progress zero; reaches 1 at completion.
-            'intervention_window_iterations': 200,          # Complete non-overlapping evidence windows; also required for baseline.
+            'intervention_window_iterations': 200,          # Rolling consecutive evidence; disjoint survival-reference updates.
+            'intervention_gate_check_interval': 2,          # Positive completed-iteration cadence; ramp advances each open iteration.
+            'execution_correction_clip_enabled': True,     # Execution only: cap after alpha, before physical FF reconstruction.
+            'execution_correction_hip_limit_nm': 12.0,      # Physical Nm, resolved by canonical joint name.
+            'execution_correction_thigh_limit_nm': 12.0,    # Physical Nm.
+            'execution_correction_calf_limit_nm': 18.0,     # Physical Nm.
             'intervention_tracking_ratio': 0.90,            # Recovery fraction of the rolling tracking-EMA quantile.
             'intervention_tracking_ema_alpha': 0.05,         # Same tracking EMA convention as disturbance curriculum.
             'intervention_tracking_reference_window': 200,  # Recent valid iteration EMAs; old easier-domain evidence ages out.
             'intervention_tracking_reference_quantile': 0.90, # Rolling reference quantile, matching disturbance curriculum.
             'intervention_min_tracking': 0.50,              # Absolute raw tracking floor, matching disturbance curriculum.
-            'intervention_failure_ratio': 1.30,              # Maximum multiple of best (lowest) window failure rate.
+            'intervention_failure_ratio': 2.00,              # Maximum multiple of best (lowest) window failure rate.
             'intervention_failure_allowance': 0.0,           # Additive failures / simulated environment-second near zero.
             'correction_ramp_enabled': True,                 # Blend accepted QP corrections into execution; full QP losses remain unchanged.
             'correction_ramp_start_offset': 0,             # Iterations after QP activation before the execution ramp starts.
             'correction_ramp_duration': 500,                # Iterations to reach full correction; 0 applies full correction immediately.
 
             # Physical constraints and prediction convention
-            'friction_coefficient': 0.6,                     # Friction-pyramid mu: abs(Fx), abs(Fy) <= mu*Fz for stance feet.
+            'friction_coefficient': 0.4,                     # Friction-pyramid mu: abs(Fx), abs(Fy) <= mu*Fz for stance feet.
             'contact_threshold': 0.5,                        # Detached contact-probability cutoff for the stance mask.
             'endpoint_torque_constraints': True,             # Enforce hard predicted endpoint PD+FF torque bounds, including recovery.
             'position_integration_coefficient': 1.0,         # Beta in q_next=q+dt*v+beta*dt^2*a; 1 is semi-implicit Euler.
@@ -670,11 +675,11 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             'torque_scale_nm': 40.0,                         # Torque variable/reference normalization scale [Nm].
             'force_tracking_weight': 1.0,                    # Inner normalized predicted-GRF tracking weight.
             'force_scale_n': 250.0,                          # Force variable/reference normalization scale [N].
-            'contact_acceleration_weight': 0.25,             # Inner stance-acceleration weight; authoritative final curriculum target.
+            'contact_acceleration_weight': 0.1,              # Inner stance-acceleration weight; authoritative final curriculum target.
             'contact_acceleration_scale_m_s2': 50.0,         # Stance-acceleration residual normalization [m/s^2].
 
             # Inner objective: torso attitude and terrain-relative height
-            'attitude_weight': 0.5,                          # Inner roll/pitch stabilization weight; final curriculum target.
+            'attitude_weight': 0.1,                          # Inner roll/pitch stabilization weight; final curriculum target.
             'attitude_kp': 20.0,                             # Tilt-error gain in desired roll/pitch angular acceleration [1/s^2].
             'attitude_kd': 5.0,                              # Angular-rate damping gain [1/s].
             'attitude_acceleration_scale_rad_s2': 20.0,      # Roll/pitch acceleration residual normalization [rad/s^2].
@@ -708,8 +713,8 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             # Performance-gated inner stance / torso-stability curriculum
             'objective_curriculum_enabled': False,            # Schedule inner weights using local-window tracking recovery.
             'torso_stability_curriculum_enabled': False,      # Include attitude/height in the objective curriculum; stance remains independent.
-            'contact_acceleration_weight_initial': 0.25,     # Initial stance weight; None uses 25% of contact_acceleration_weight.
-            'attitude_weight_initial': None,                 # Initial attitude weight; None uses 25% of attitude_weight.
+            'contact_acceleration_weight_initial': 0.1,      # Matches authoritative final component weight.
+            'attitude_weight_initial': 0.1,                  # Matches authoritative final component weight.
             'height_weight_initial': None,                   # Initial height weight; None uses 25% of height_weight.
             'objective_curriculum_start': None,              # Earliest absolute iteration for progression; None follows execution-ramp completion.
             'objective_curriculum_progress_delta': 0.05,     # Fraction of initial-to-final weight range added per successful advancement.

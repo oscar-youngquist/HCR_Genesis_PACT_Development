@@ -1196,6 +1196,17 @@ class Go2HardPACT(Go2PACT):
                 if qp.cfg.endpoint_torque_constraints:
                     tracking_inputs.update({key: value[rows] for key, value in
                         effective_feedback_gains(self._hard_pact_control_parameters).items()})
+                base = safe[rows]
+                alpha = getattr(self, '_qp_execution_alpha', 1.0)
+                extra_enabled = (qp.cfg.qp_update_mode == 'curriculum_substeps'
+                                 and qp.cfg.intervention_extra_strength_enabled)
+                if extra_enabled:
+                    baseline = (self._qp_baseline_selection[rows] & (1 << self._qp_substep)) != 0
+                    strength = getattr(self, '_qp_extra_strength', qp.cfg.intervention_extra_strength_start)
+                    alpha = torch.where(baseline, base.new_tensor(alpha), base.new_tensor(alpha*strength))
+                if qp.cfg.execution_correction_clip_enabled:
+                    tracking_inputs.update(execution_base=base,
+                        execution_alpha=torch.as_tensor(alpha,device=base.device,dtype=base.dtype).expand(rows.numel()).reshape(-1,1))
                 result = qp.solve(differentiable=False,environment_ids=rows,
                     **tracking_inputs,
                     mass_matrix=context.mass_matrix,bias=context.bias,
@@ -1208,16 +1219,9 @@ class Go2HardPACT(Go2PACT):
                     dt=tau_nom.new_full((rows.numel(),1),dt))
                 self._qp_interval_timing_ms[rows] += (time.perf_counter()-start)*1000.0
                 from rsl_rl.algorithms.hard_pact_qp_curriculum import execution_torque
-                base = safe[rows]
-                alpha = getattr(self, "_qp_execution_alpha", 1.0)
-                extra_enabled = (qp.cfg.qp_update_mode == 'curriculum_substeps'
-                                 and qp.cfg.intervention_extra_strength_enabled)
-                if extra_enabled:
-                    baseline = (self._qp_baseline_selection[rows] & (1 << self._qp_substep)) != 0
-                    strength = getattr(self, '_qp_extra_strength', qp.cfg.intervention_extra_strength_start)
-                    alpha = torch.where(baseline, base.new_tensor(alpha), base.new_tensor(alpha*strength))
                 accepted = result.differentiated_mask | result.recovery_mask
-                executed = execution_torque(base, result.tau_safe, accepted, alpha)
+                executed = execution_torque(base, result.tau_safe, accepted, alpha,
+                    qp.execution_correction_limits(base),qp.torque_limits.to(base))
                 safe[rows] = executed
                 if aggregate is not None:
                     # Candidate acceptance is NOT a certificate for the blend.
@@ -1225,12 +1229,19 @@ class Go2HardPACT(Go2PACT):
                     aggregate.add_sum("execution/executed_correction_abs_sum_nm", (executed-base).abs().sum())
                     aggregate.add_sum("execution/correction_coordinates", base.new_tensor(base.numel()))
                     aggregate.add_sum("execution/partially_corrected_rows", (accepted & (alpha < 1)).sum())
+                    if qp.cfg.execution_correction_clip_enabled:
+                        scale=torch.as_tensor(alpha,device=base.device,dtype=base.dtype).reshape(-1,1)
+                        requested=scale*(result.tau_safe-base)
+                        clipped=(requested.abs()>qp.execution_correction_limits(base)).any(-1)&accepted
+                        aggregate.add_values('execution/clipped_fraction',clipped.float(),accepted)
+                        aggregate._candidate_summary('execution/requested_correction_nm',requested.abs(),accepted[:,None])
+                        aggregate._candidate_summary('execution/applied_correction_nm',(executed-base).abs(),accepted[:,None])
                     if extra_enabled and qp._physical_enabled():
                         aggregate.add_values('execution/extra_strength',base.new_tensor(strength))
                         for name, mask in (('baseline',baseline),('extra',~baseline)):
                             aggregate.add_values('execution/'+name+'_applied_correction_squared_nm2',
                                 (executed-base).square().mean(-1),accepted & mask)
-                certified[rows] = result.differentiated_mask & (alpha == 1.0)
+                certified[rows] = result.differentiated_mask & (alpha == 1.0) & (executed==result.tau_safe).all(-1)
                 zeros = tau_nom.new_zeros(rows.numel())
                 residual = torch.stack((result.diagnostics["selected/equality_max"],
                     result.diagnostics["selected/inequality_max"],
@@ -1247,8 +1258,8 @@ class Go2HardPACT(Go2PACT):
                 local = (self._qp_sampled_substep_index[rows].long()==self._qp_substep).nonzero(as_tuple=True)[0]
                 dest = rows[local]
                 sample = self._qp_sampled_transition
-                if extra_enabled:
-                    sample['sampled_qp_execution_alpha'][dest] = alpha[local,None]
+                if extra_enabled or qp.cfg.execution_correction_clip_enabled:
+                    sample['sampled_qp_execution_alpha'][dest] = torch.as_tensor(alpha,device=base.device,dtype=base.dtype).expand(rows.numel())[local,None]
                 if getattr(self, '_cache_qp_replay_mechanics', False):
                     from rsl_rl.algorithms.hard_pact_qp_mechanics_cache import copy_mechanics
                     copy_mechanics(sample, context, dest, local)
@@ -1428,7 +1439,7 @@ class Go2HardPACT(Go2PACT):
 
         }
 
-        if extra_enabled:
+        if extra_enabled or self._hard_pact_rollout_qp.cfg.execution_correction_clip_enabled:
             self._qp_sampled_transition['sampled_qp_execution_alpha'] = shape(1)
             self._qp_sampled_transition['sampled_qp_base_rate_clip'] = torch.full(
                 (self.num_envs,1),bool(getattr(self.cfg.control,'clip_torque_rate_without_qp',False)),

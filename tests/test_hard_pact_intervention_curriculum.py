@@ -17,6 +17,7 @@ def config(**kw):
     defaults = dict(qp_update_mode='curriculum_substeps', warmup_iterations=0,
                     correction_ramp_enabled=False, intervention_settling_iterations=0,
                     intervention_ramp_iterations=10, intervention_window_iterations=2,
+                    intervention_gate_check_interval=2,
                     intervention_tracking_ema_alpha=1., intervention_tracking_reference_window=4)
     return replace(HardPACTQPConfig(), **(defaults | kw))
 
@@ -133,9 +134,11 @@ def test_weighted_evidence_missing_window_and_absolute_allowance():
     assert s.progress == before and not s.gate
     finish(s,6,.9,failures=0)
     finish(s,7,.9,failures=0)
+    assert not s.gate  # rolling evidence ready, but next scheduled recheck is iteration 8
+    finish(s,8,.9,failures=0)
     assert s.gate and s.progress == before
-    finish(s,9,.9,failures=0)  # missing iteration invalidates window
-    finish(s,10,.9,failures=0)
+    finish(s,10,.9,failures=0)  # missing iteration invalidates window
+    finish(s,11,.9,failures=0)
     assert not s.gate
 
 

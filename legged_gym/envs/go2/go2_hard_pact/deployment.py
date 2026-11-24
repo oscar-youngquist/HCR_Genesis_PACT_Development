@@ -101,6 +101,15 @@ def qp_update_contract(mode, decimation, warmup_iterations=0, qp_config=None,
         "frames": "world forces and world-aligned wrench about the existing base-Jacobian point; yaw-local head outputs rotated once",
         "limits": "canonical joint-specific magnitude/position/velocity limits from backend; no independent acceleration cap; joint envelope derived from position/velocity; rate and objective scales in solver_and_objective_settings",
     }
+    if settings.execution_correction_clip_enabled:
+        result['execution_correction_postprocessing']={
+            'version':1,
+            'units':'physical Nm in canonical FR/FL/RR/RL hip/thigh/calf order',
+            'formula':'actuator_clamp(base + clamp(alpha*(candidate-base), -limits, limits)); accepted primary/recovery only',
+            'placement':'after correction/extra strength, before feedforward reconstruction; no second motor/PD scaling',
+            'certification':'modified execution does not inherit candidate joint/endpoint feasibility',
+            'ppo':'captured anchor alpha and base-rate flag; current-policy baseline; ordinary clamp derivative; uncapped projection/slack losses',
+            'legacy':'missing enabled flag means disabled'}
     return result
 
 

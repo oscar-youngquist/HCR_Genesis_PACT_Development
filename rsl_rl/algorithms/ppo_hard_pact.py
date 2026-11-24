@@ -2925,8 +2925,8 @@ class PPO_HardPACT:
                 qp_arguments.update(velocity_command=qp_batch["sampled_qp_velocity_command"].detach(),
                                     base_linear_velocity_world=sample_v[:,:3].detach())
             execution_arguments = {}
-            if (self.qp_config.qp_update_mode == 'curriculum_substeps'
-                    and self.qp_config.intervention_extra_strength_enabled
+            if (((self.qp_config.qp_update_mode == 'curriculum_substeps'
+                    and self.qp_config.intervention_extra_strength_enabled) or self.qp_config.execution_correction_clip_enabled)
                     and (self.lambda_qp_velocity_xy>0 or self.lambda_qp_velocity_yaw>0)):
                 from .hard_pact_qp import project_nominal_torque
                 if 'sampled_qp_execution_alpha' not in qp_batch or 'sampled_qp_base_rate_clip' not in qp_batch:
@@ -3077,8 +3077,8 @@ class PPO_HardPACT:
             if self.lambda_qp_velocity_xy>0 or self.lambda_qp_velocity_yaw>0:
                 accepted = qp_result.differentiated_mask | qp_result.recovery_mask
                 velocity_qdd = qp_result.qdd
-                if (self.qp_config.qp_update_mode == 'curriculum_substeps'
-                        and self.qp_config.intervention_extra_strength_enabled):
+                if ((self.qp_config.qp_update_mode == 'curriculum_substeps'
+                        and self.qp_config.intervention_extra_strength_enabled) or self.qp_config.execution_correction_clip_enabled):
                     velocity_qdd = qp_result.execution_qdd
                 physical_metrics={}
                 xy,yaw,count = self.hard_pact_qp.velocity_tracking_losses(

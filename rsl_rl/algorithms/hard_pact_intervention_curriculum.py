@@ -1,6 +1,6 @@
 """Iteration-boundary intervention schedule, independent of objective weights.
 
-Gate evidence uses non-overlapping, complete iteration windows. Tracking is
+Gate evidence uses rolling, complete iteration windows. Tracking is
 sample-weighted; failures are events / simulated environment-second. A missing
 iteration invalidates its window, not an invitation to reuse reporting totals.
 """
@@ -9,11 +9,17 @@ from copy import deepcopy
 
 
 def legacy_extra_strength_contract(saved, current):
-    """Only fill absent strength fields with legacy DISABLED defaults."""
+    """Fill absent execution options with legacy DISABLED defaults."""
     if not isinstance(saved,dict) or not isinstance(current,dict):
         return deepcopy(saved)
     result=deepcopy(saved)
     if 'qp_update_mode' in saved:
+        for key,value in (('execution_correction_clip_enabled',False),
+                          ('execution_correction_hip_limit_nm',12.),
+                          ('execution_correction_thigh_limit_nm',12.),
+                          ('execution_correction_calf_limit_nm',18.),
+                          ('intervention_gate_check_interval',5)):
+            if key in current:result.setdefault(key,value)
         for key,value in (('intervention_extra_strength_enabled',False),
                           ('intervention_extra_strength_start',.25)):
             if key in current: result.setdefault(key,value)
@@ -78,7 +84,8 @@ class InterventionCurriculum:
 
     def __init__(self, cfg, actor_ramp_iterations=0):
         for name in ('intervention_settling_iterations', 'intervention_ramp_iterations',
-                     'intervention_window_iterations', 'intervention_tracking_reference_window'):
+                     'intervention_window_iterations', 'intervention_tracking_reference_window',
+                     'intervention_gate_check_interval'):
             value = getattr(cfg, name)
             if not math.isfinite(value) or int(value) != value or value < (0 if 'settling' in name else 1):
                 raise ValueError('Invalid '+name)
@@ -109,6 +116,10 @@ class InterventionCurriculum:
         self.start = self.ramp_end + cfg.intervention_settling_iterations
         self.duration = cfg.intervention_ramp_iterations
         self.window = cfg.intervention_window_iterations
+        self.check_interval = cfg.intervention_gate_check_interval
+        self.evidence = []
+        self.last_check = None
+        self.check_count = 0
         self.tracking_ratio = cfg.intervention_tracking_ratio
         self.failure_ratio = cfg.intervention_failure_ratio
         self.failure_allowance = cfg.intervention_failure_allowance
@@ -139,7 +150,7 @@ class InterventionCurriculum:
         if iteration < self.ramp_end:
             self.reason = self.RAMP
             return
-        valid = (tracking is not None and failures is not None and exposure is not None
+        valid = (tracking is not None and count is not None and failures is not None and exposure is not None
                  and all(math.isfinite(v) for v in (tracking, count, failures, exposure))
                  and count > 0 and exposure > 0 and failures >= 0 and consecutive)
         # Use only the decision from a PREVIOUS completed window. Missing
@@ -149,11 +160,15 @@ class InterventionCurriculum:
         if not valid:
             self.gate = False
             self.reason = self.EVIDENCE
+            self.evidence = []
+            self.last_check = None
         if self.window_start is None:
             self.window_start = iteration
         self.window_iterations += 1
         self.window_valid &= valid
         if valid:
+            self.evidence.append((iteration,float(tracking)*float(count),float(count),float(failures),float(exposure)))
+            self.evidence = self.evidence[-self.window:]
             # Same EMA and rolling quantile convention as domain randomization.
             # Keep decisions windowed, but let obsolete easy-domain scores age out.
             alpha = self.tracking_ema_alpha
@@ -168,24 +183,34 @@ class InterventionCurriculum:
         if iteration - self.window_start + 1 >= self.window:
             complete = (self.window_valid and self.window_iterations == self.window)
             if complete:
-                self.tracking_mean = self.tracking_sum / self.tracking_count
-                self.failure_rate = self.failures / self.exposure
-                ordered = sorted(self.tracking_history)
-                self.tracking_reference = ordered[int(self.tracking_reference_quantile*(len(ordered)-1))]
-                self.tracking_threshold = max(self.min_tracking, self.tracking_ratio*self.tracking_reference)
-                self.failure_reference = (self.failure_rate if self.failure_reference is None
-                    else min(self.failure_reference, self.failure_rate))
-                good_tracking = self.tracking_ema >= self.tracking_threshold
-                good_failures = self.failure_rate <= self.failure_ratio*self.failure_reference + self.failure_allowance
-                self.gate = good_tracking and good_failures
-                self.reason = self.TRACKING if not good_tracking else self.FAILURES if not good_failures else self.OPEN
-            else:
-                self.gate = False
-                self.reason = self.EVIDENCE
+                # Best survival reference advances ONLY on disjoint windows.
+                rate = self.failures / self.exposure
+                self.failure_reference = rate if self.failure_reference is None else min(self.failure_reference,rate)
             self.window_start = None
             self.window_iterations = 0
             self.tracking_sum = self.tracking_count = self.failures = self.exposure = 0.
             self.window_valid = True
+        if len(self.evidence) == self.window:
+            self.tracking_mean = sum(x[1] for x in self.evidence)/sum(x[2] for x in self.evidence)
+            self.failure_rate = sum(x[3] for x in self.evidence)/sum(x[4] for x in self.evidence)
+            if self.failure_reference is None:
+                # First complete consecutive window establishes the baseline;
+                # don't wait for an older invalid block's alignment to expire.
+                self.failure_reference = self.failure_rate
+                self.window_start = None
+                self.window_iterations = 0
+                self.tracking_sum = self.tracking_count = self.failures = self.exposure = 0.
+                self.window_valid = True
+            if self.failure_reference is not None and (self.last_check is None or iteration-self.last_check >= self.check_interval):
+                self.last_check = iteration
+                self.check_count += 1
+                ordered = sorted(self.tracking_history)
+                self.tracking_reference = ordered[int(self.tracking_reference_quantile*(len(ordered)-1))]
+                self.tracking_threshold = max(self.min_tracking,self.tracking_ratio*self.tracking_reference)
+                good_tracking = self.tracking_ema >= self.tracking_threshold
+                good_failures = self.failure_rate <= self.failure_ratio*self.failure_reference+self.failure_allowance
+                self.gate = good_tracking and good_failures
+                self.reason = self.TRACKING if not good_tracking else self.FAILURES if not good_failures else self.OPEN
         if iteration < self.start:
             self.reason = self.SETTLING
         elif self.progress == 1:
@@ -197,6 +222,8 @@ class InterventionCurriculum:
         return dict(progress=self.snapshot_progress, probability_2=p[0], probability_3=p[1],
                     probability_4=p[2], expected_solves=sum(n*v for n,v in zip((2,3,4),p)),
                     gate_open=int(self.gate), gate_reason=self.reason,
+                    window_ready=int(len(self.evidence)==self.window), window_iterations=len(self.evidence),
+                    gate_checks=self.check_count,
                     tracking_mean=unavailable(self.tracking_mean),
                     tracking_ema=unavailable(self.tracking_ema),
                     tracking_threshold=unavailable(self.tracking_threshold),
@@ -205,7 +232,7 @@ class InterventionCurriculum:
                     failure_reference=unavailable(self.failure_reference))
 
     def state_dict(self):
-        return dict(version=2, **deepcopy(vars(self)))
+        return dict(version=3, **deepcopy(vars(self)))
 
     def load_state_dict(self, state):
         state = deepcopy(state)
@@ -220,7 +247,11 @@ class InterventionCurriculum:
                          gate=False, reason=self.EVIDENCE, window_start=None,
                          window_iterations=0, tracking_sum=0., tracking_count=0.,
                          failures=0., exposure=0., window_valid=True)
-        if state.get('version') != 2 or set(state) != {'version', *vars(self)}:
+        if state.get('version') == 2:
+            state.update(version=3,check_interval=self.check_interval,evidence=[],last_check=None,check_count=0,
+                         gate=False,reason=self.EVIDENCE,window_start=None,window_iterations=0,
+                         tracking_sum=0.,tracking_count=0.,failures=0.,exposure=0.,window_valid=True)
+        if state.get('version') != 3 or set(state) != {'version', *vars(self)}:
             raise ValueError('Incompatible intervention curriculum state')
         intervention_probabilities(state['progress'])
         self.__dict__.update(deepcopy({k:v for k,v in state.items() if k != 'version'}))

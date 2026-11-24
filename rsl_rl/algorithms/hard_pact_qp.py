@@ -160,6 +160,11 @@ class HardPACTQPConfig:
     intervention_extra_strength_enabled: bool = False
     intervention_extra_strength_start: float = .25
     intervention_window_iterations: int = 200
+    intervention_gate_check_interval: int = 5
+    execution_correction_clip_enabled: bool = False
+    execution_correction_hip_limit_nm: float = 12.
+    execution_correction_thigh_limit_nm: float = 12.
+    execution_correction_calf_limit_nm: float = 18.
     intervention_tracking_ratio: float = .90
     intervention_tracking_ema_alpha: float = .05
     intervention_tracking_reference_window: int = 200
@@ -314,6 +319,13 @@ class HardPACTQPConfig:
 
     def __post_init__(self):
         import math
+        if (not math.isfinite(self.intervention_gate_check_interval) or self.intervention_gate_check_interval<1
+                or int(self.intervention_gate_check_interval)!=self.intervention_gate_check_interval):
+            raise ValueError('intervention_gate_check_interval must be a positive integer')
+        for kind in ('hip','thigh','calf'):
+            limit=getattr(self,'execution_correction_'+kind+'_limit_nm')
+            if not math.isfinite(limit) or limit<=0:
+                raise ValueError('Execution correction limits must be finite and positive')
         if not math.isfinite(self.intervention_extra_strength_start) or not 0 <= self.intervention_extra_strength_start <= 1:
             raise ValueError('intervention_extra_strength_start must be finite and in [0,1]')
         if self.cupiqp_primary_bucket_policy not in ('tight','power_of_two','exact'):
@@ -581,6 +593,10 @@ class HardPACTDifferentiableQP:
             raise ValueError("QP full_audit_sample_size must be positive")
         self._constant_cache = {}
         self._limit_cache = {}
+        self._execution_limit_cache = {}
+        from .hard_pact_qp_curriculum import correction_limits_for_joints
+        self._execution_limit_values = correction_limits_for_joints(
+            tuple(f'{leg}_{kind}_joint' for leg in ('FR','FL','RR','RL') for kind in ('hip','thigh','calf')),config)
         self._solve_count = 0
         self._backend_config = config
         self._backend_instances = {
@@ -685,6 +701,31 @@ class HardPACTDifferentiableQP:
     @property
     def diagnostics_level(self):
         return self.cfg.diagnostics_level
+
+    def execution_correction_limits(self, ref):
+        if not self.cfg.execution_correction_clip_enabled:return None
+        key=(ref.device,ref.dtype)
+        if key not in self._execution_limit_cache:
+            # Rollout first populates this cache under inference_mode. PPO's
+            # clamp backward must be able to save these same constant bounds.
+            with torch.inference_mode(False):
+                self._execution_limit_cache[key]=ref.new_tensor(self._execution_limit_values)
+        return self._execution_limit_cache[key]
+
+    @torch.no_grad()
+    def _post_execution_diagnostics(self, stage, m, x, base, alpha, accepted, data, aggregate):
+        if not self.cfg.execution_correction_clip_enabled or not self._physical_enabled():return
+        from .hard_pact_qp_curriculum import execution_torque
+        executed=execution_torque(base,x[:,:12],accepted,alpha,
+            self.execution_correction_limits(x),self.torque_limits.to(x))
+        physical=torch.cat((executed,x[:,12:24]),-1)
+        acceleration=(m.acceleration_map[:,:,:24]@physical[...,None]).squeeze(-1)+m.acceleration_offset
+        _,ql,qu,vl=self._limits(x)
+        aggregate.compact_candidate('execution_'+stage,m,physical,data,accepted,ql,qu,vl,
+            self.cfg.position_integration_coefficient,acceleration=acceleration)
+        if self.cfg.endpoint_torque_constraints:
+            residual=(m.physical_G[:,68:92,:24]@physical[...,None]).squeeze(-1)-m.physical_h[:,68:92]
+            aggregate._candidate_summary('execution/'+stage+'/endpoint_torque_exceedance_nm',residual.clamp_min(0),accepted[:,None])
 
     def _physical_enabled(self):
         return (self.cfg.tensorboard_diagnostics_enabled and self.diagnostics_level in ("physical", "full")
@@ -1389,8 +1430,12 @@ class HardPACTDifferentiableQP:
             aggregate.add_sum("backend/dispatch_count",rows.new_tensor(1))
             aggregate.add_sum("backend/dispatched_rows",rows.new_tensor(rows.numel()))
             capture = getattr(self, "diagnostic_capture", None)
-            packet = capture.before(self, m, {k:v.index_select(0,local) for k,v in part.items()},
-                                    "primary", rows) if capture is not None else None
+            packet = None
+            if capture is not None:
+                captured_data={k:v.index_select(0,local) for k,v in part.items()}
+                if execution_base is not None:
+                    captured_data.update(execution_base=execution_base[rows].detach(),execution_alpha=execution_alpha[rows].detach())
+                packet=capture.before(self,m,captured_data,"primary",rows)
             try:
                 # Inclusive dispatch time is separate from backend numerical
                 # solve, packing and setup/update; never sum it into solve_ms.
@@ -1452,8 +1497,11 @@ class HardPACTDifferentiableQP:
             derived = (m.acceleration_map @ x[...,None]).squeeze(-1)+m.acceleration_offset
             if execution_qdd is not None:
                 blended = blended_candidate_acceleration(derived,x[:,:12],execution_base[rows],
-                    execution_alpha[rows],m.acceleration_map[:,:,:12],accepted)
+                    execution_alpha[rows],m.acceleration_map[:,:,:12],accepted,
+                    self.execution_correction_limits(ref),self.torque_limits.to(ref))
                 execution_qdd = execution_qdd.index_copy(0,rows,blended)
+                self._post_execution_diagnostics('primary',m,x,execution_base[rows],execution_alpha[rows],accepted,
+                    {k:v[rows] for k,v in values.items()},aggregate)
             if self._compact_diagnostics_enabled():
                 _,ql,qu,vl=self._limits(ref)
                 aggregate.compact_candidate("primary",m,raw_candidate,{k:v[rows] for k,v in values.items()},
@@ -1504,8 +1552,12 @@ class HardPACTDifferentiableQP:
                         aggregate.add_sum("backend/dispatch_count",rows.new_tensor(1))
                         aggregate.add_sum("backend/dispatched_rows",rows.new_tensor(rows.numel()))
                         capture = getattr(self, "diagnostic_capture", None)
-                        packet = capture.before(self, m, {k:v[rows] for k,v in values.items()},
-                                                "recovery", rows) if capture is not None else None
+                        packet = None
+                        if capture is not None:
+                            captured_data={k:v[rows] for k,v in values.items()}
+                            if execution_base is not None:
+                                captured_data.update(execution_base=execution_base[rows].detach(),execution_alpha=execution_alpha[rows].detach())
+                            packet=capture.before(self,m,captured_data,"recovery",rows)
                         try:
                             result = self._backend_solve(m)
                         except QPBackendUnavailable:
@@ -1543,8 +1595,11 @@ class HardPACTDifferentiableQP:
                         a = (m.acceleration_map@x[...,None]).squeeze(-1)+m.acceleration_offset
                         if execution_qdd is not None:
                             blended = blended_candidate_acceleration(a,x[:,:12],execution_base[rows],
-                                execution_alpha[rows],m.acceleration_map[:,:,:12],accepted)
+                                execution_alpha[rows],m.acceleration_map[:,:,:12],accepted,
+                                self.execution_correction_limits(ref),self.torque_limits.to(ref))
                             execution_qdd = execution_qdd.index_copy(0,rows,blended)
+                            self._post_execution_diagnostics('recovery',m,x,execution_base[rows],execution_alpha[rows],accepted,
+                                {k:v[rows] for k,v in values.items()},aggregate)
                         if self._compact_diagnostics_enabled():
                             _,ql,qu,vl=self._limits(ref)
                             aggregate.compact_candidate("recovery",m,raw_candidate,{k:v[rows] for k,v in values.items()},
