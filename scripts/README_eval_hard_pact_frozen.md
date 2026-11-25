@@ -347,3 +347,171 @@ The deployment test's stale fixed 250 N expectation was corrected to use the
 unchanged current config's GRF scale. Remaining warnings are deliberate solver
 failure injections and the installed hppfcl deprecation. No training, simulator
 runs, GPU tests, or benchmarks were run for this removal.
+# Four-solve intervention/weight evaluation (November 2026)
+
+Opt-in only; no runner, optimizer, weight update, or training-default change.
+`eval_hard_pact_tradeoff.py --intervention-sweep` preserves
+`curriculum_substeps`, freezes its frequency at `(0,0,1)`, and retains the
+randomized baseline masks (substep zero plus one later step). The conditions are:
+
+- `A_reference`: all four strengths 1.
+- `B_extra050`: baseline strengths 1, additional strengths 0.5.
+- `C_attitude005`: A execution, inner attitude weight 0.05 only.
+- `D_planar10`: A execution, inner planar tracking weight 10 only.
+- `B_extra075`: optional follow-up, additional strengths 0.75.
+
+Saved stance remains 0.1. Saved clipping is applied **after** the strengths.
+The evaluator asserts the configuration-difference allowlist, four real solves,
+two baseline interventions, per-row alpha, reconstructed actual torque, and
+unchanged model tensors. The older attitude-probe preset is not used.
+
+From the `rescaled_qp_exps` worktree, with `lr_lab_cupiqp` activated:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 SIMULATOR=isaaclab PYTHONPATH="$PWD" \
+python scripts/eval_hard_pact_tradeoff.py --intervention-sweep \
+  --event events.out.tfevents.1795413624.CICSUNIX-US-003.133079.0 \
+  --checkpoint logs/hardpact_iclr/go2_hard_pact_rss_full/Nov23_01-00-22_hard_pact_rss_full_isaaclab/model_10500.pt \
+  --output diagnostics/intervention10500/full --steps 1000 --seeds 1
+PYTHONPATH="$PWD" python scripts/report_hard_pact_tradeoff.py diagnostics/intervention10500/full
+```
+
+The bounded smoke uses `--steps 12 --variants A_reference B_extra050` and a
+separate output directory. Follow-ups explicitly select `--variants` and
+`--seeds`; they are not launched automatically. Completed trials are skipped.
+Changed evaluator code/protocol requires a new output directory.
+
+Terrain geometry is the saved training geometry. Targeting uses the latest
+500 checkpoint-era iterations of failure counts, selects the three highest
+represented failure levels, and allocates 3 stair-down / 3 stair-up / 4
+discrete-obstacle environments. **Training logs contain family and level
+marginals, not joint failure counts.** Do not describe selected combinations
+as individually proven high-failure cells. Initial-state hashes are checked
+across conditions. Native commands/randomization diverge after asynchronous
+resets despite shared seeds; this is not exact counterfactual state matching.
+
+Artifacts include checkpoint/config/code hashes, resolved manifests, archived
+evaluator sources, per-seed JSON, CSV comparisons and weighted objective costs,
+plots, compact traces, and at most 24 episode-safe half-second failure histories
+plus six healthy controls. A 100-physics-step device ring captures the histories.
+Detailed data and new metrics are evaluation-only. Failure counts include all
+samples, even after the history cap; capture drops are reported.
+
+Objective and executed-motion diagnostics reuse the captured affine maps. For
+execution reconstruction, **optimized candidate forces remain fixed** while
+torque changes; these are predictions, not measured contact-force behavior or
+post-clipping feasibility certificates. Body-velocity derivatives use live body
+frames at both timestamps. Reset/teleport intervals are excluded from aligned
+model errors but retained in failure counts. Numerical solver regularization is
+not a physical objective component. Recovery slack penalty is reported
+separately. Cause thresholds overlap and are not causal attributions.
+
+The preliminary follow-up screen requires fewer failures, each tracking RMSE
+no larger than reference ×1.10 +0.01 (m/s or rad/s), joint violation frequency
+increase at most 0.001, and torque-excess maximum increase at most 0.01 Nm.
+These are explicit practical margins, not significance tests. Results at one
+seed remain preliminary; use seed 2 only for A and the promising candidate.
+
+Observed November 24 results (`diagnostics/intervention10500/full`): checkpoint
+10500, SHA256 `d0f1116eb39ee6a0796237c473ae45d6bc30012c0a43e76cc965da3c008097a4`.
+Each condition: seed 1, ten environments, 1000 control steps, 200 env-seconds.
+
+| Condition | Failures | Failures/env-s | RMSE vx / vy / wz | Completed episode mean [s] |
+|---|---:|---:|---|---:|
+| A | 12 | 0.060 | 0.192 / 0.221 / 0.202 | 11.01 |
+| B, extra alpha 0.5 | 4 | 0.020 | 0.272 / 0.278 / 0.222 | 15.17 |
+| C, attitude 0.05 | 6 | 0.030 | 0.238 / 0.222 / 0.193 | 14.32 |
+| D, planar weight 10 | 8 | 0.040 | 0.254 / 0.283 / 0.197 | 13.35 |
+
+Tracking units: m/s, m/s, rad/s. Completed-episode means exclude unfinished
+episodes; survival plots retain right-censoring. Family exposure was identical:
+60 stair-down, 60 stair-up, 80 discrete-obstacle env-seconds, levels 6/7/8.
+Initial state hashes matched, but asynchronous resets changed subsequent
+command/randomization streams. Shared pre-reset windows covered 98–115
+env-seconds per comparison; B's tracking penalty was smaller there than in
+the full evaluation. These are preliminary single-seed results.
+
+All 160000 primary candidates were accepted; zero recovery/fallback rows,
+zero measured actuator torque-limit exceedance. Small measured joint-limit
+exceedances remained. D had a rare velocity-excess peak of 5.36 rad/s versus
+1.81 in A. Post-cap predicted endpoint violations were nonzero, illustrating
+why execution cannot inherit candidate certification. Reconstructed executed
+torque matched within 5.3e-6 Nm, and model tensors remained unchanged.
+
+Executed-model planar error worsened versus nominal in 9.52%, 5.21%, 8.18%,
+and 15.58% of valid A/B/C/D rows. Nearly all such rows improved predicted
+attitude cost. These are model cost-tradeoff associations, not proof of the
+cause of physical failures; execution costs assume optimized contact forces.
+
+No alternative passed the declared survival-plus-tracking screen, so neither
+alpha-0.75 nor seed-2 follow-ups were run. No training continuation is
+recommended from this experiment alone. All 30 failures were captured, with
+zero capture drops; healthy references and objective CSV/plots are included.
+Collection/diagnostic wall time was 215–221 s per condition, excluding startup;
+PyTorch peak allocated memory was 81–83 MiB, excluding PhysX/renderer memory.
+A sampled GPU-1 total was about 4.6 GiB. GPU 0 hosted ongoing training, so
+shared-host interference remains possible; these are not deployment latencies.
+
+Validation executed: seven focused evaluator tests (including production
+Q/p cost parity and ring ownership), CUDA execution-cap regressions, and two
+12-step A/B simulator smokes. Isaac Lab emitted file-watcher-limit warnings
+but completed every run. No production settings or training weights changed.
+# Reset-independent wrench-load stress test (model 10500)
+
+Evaluation only, physical GPU 1. This bounded driver runs B/C/E/F at seed 1,
+then the selected candidate and QP-off at seed 2, with light/heavier wrench
+tapes (eight runs, 10 environments x 1000 control steps). No tracking veto:
+selection sorts failures, roll+pitch RMS, height-error RMS, then tracking RMSE.
+
+```bash
+conda activate lr_lab_cupiqp
+CUDA_VISIBLE_DEVICES=1 SIMULATOR=isaaclab PYTHONPATH="$PWD" \
+python -u scripts/run_hard_pact_wrench_stress.py \
+  --output diagnostics/wrench_stress10500/full
+```
+
+Native command/heading targets and persistent disturbance waveforms are
+precomputed against absolute control time. Heavy amplitudes are twice light,
+bounded by final saved envelopes **at event amplitude**, preserving waveform
+shape. Realized mass/CoM, gains, friction and joint properties remain fixed;
+action delays retain their initial samples. Push/noise RNG streams are keyed
+by absolute step and isolated from resets/QP selection. Heading feedback still
+depends on actual heading, so realized yaw commands can diverge. Reset history,
+state, queue contents and trajectories necessarily diverge after failures.
+The source checkpoint's applied-wrench frame/origin conversion is unchanged.
+
+`tapes.npz` and manifest hashes allow paired verification. QP-off retains the
+same actor/estimator/controller path but bypasses the intervention callback.
+Full candidate and post-cap predictions retain candidate GRFs, not measured
+forces. They are not certificates of measured motion. Normal termination is
+unchanged; failure histories are capped at 24/run and aggregates retain all
+events. This is a wrench-load stress test, not moving-liquid transport.
+
+Focused checks:
+```bash
+python -m pytest -p no:cacheprovider tests/test_hard_pact_wrench_stress.py tests/test_eval_hard_pact_tradeoff.py -q
+python scripts/run_hard_pact_wrench_stress.py --output diagnostics/wrench_stress10500/full --report-only
+```
+
+### Checkpoint-15000 preservation / oracle diagnostic
+
+`run_hard_pact_preservation_eval.py` pins the Nov23 `model_15000.pt` hash.
+It restores that checkpoint's current disturbance envelope (the inherited
+`light` selector does not mean checkpoint-10500 bounds). Conditions are `off`
+(A), `A_reference` (B, four alpha=1 solves), `C_torque30` (C), and
+`D_true_wrench` (D, diagnostic only). The oracle replaces only the QP input,
+holding the current applied base-origin wrench yaw-local at control rate.
+It includes the application-point moment once, not randomized inertia/gravity.
+
+```bash
+CUDA_VISIBLE_DEVICES=1 SIMULATOR=isaaclab PYTHONPATH=. python scripts/run_hard_pact_preservation_eval.py --output diagnostics/preservation15000/smoke --smoke
+CUDA_VISIBLE_DEVICES=1 SIMULATOR=isaaclab PYTHONPATH=. python scripts/run_hard_pact_preservation_eval.py --output diagnostics/preservation15000/full
+# Only after C passes the preliminary tradeoff assessment; B/C only:
+CUDA_VISIBLE_DEVICES=1 SIMULATOR=isaaclab PYTHONPATH=. python scripts/run_hard_pact_preservation_eval.py --output diagnostics/preservation15000/full --seed 3
+```
+
+Workers use physical GPU1 / internal cuda:0. Each full condition is 10
+environments x 1000 controls. Completed conditions are skipped; reports include
+paired input/config assertions, active exposure, and world-vertical velocity.
+Seed-specific CSV/JSON and plots, manifests, bounded histories and source copies
+are retained. No optimizer is constructed or updated by this evaluation.

@@ -699,7 +699,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
 
             # Outer projection losses (overall lambda_projection is configured above)
             'projection_contact_acceleration_weight': 0.10,  # Fixed outer stance-residual coefficient; not scheduled with inner weight.
-            'recovery_projection_weight': 0.5,               # Outer recovery correction/slack multiplier before lambda_projection.
+            'recovery_projection_weight': 0.01,               # Outer recovery correction/slack multiplier before lambda_projection.
             'recovery_projection_slack_weight': 1.0,         # Relative outer penalty on normalized joint-envelope recovery slack.
             'recovery_projection_rate_slack_weight': 1.0,    # Relative outer rate-slack penalty; absent when QP rate constraints are off.
 

@@ -19,7 +19,15 @@ VARIANTS = {'saved': None, 'stance0_torque20': (0.,20.),
             'stance010_torque20': (.1,20.), 'stance010_torque30': (.1,30.)}
 ATTITUDE_VARIANTS = {'attitude050_normal':(.5,False),'attitude010_normal':(.1,False),
                      'attitude050_probe':(.5,True),'attitude010_probe':(.1,True)}
-ALL_VARIANTS = {**VARIANTS,**ATTITUDE_VARIANTS}
+INTERVENTION_VARIANTS = {'A_reference':({},1.), 'B_extra050':({},.5),
+    'C_attitude005':({'attitude_weight':.05},1.), 'D_planar10':({'planar_velocity_weight':10.},1.),
+    'B_extra075':({},.75), 'E_extra075':({},.75),
+    'F_extra075_attitude005':({'attitude_weight':.05},.75), 'off':({},1.),
+    'B_planar10':({'planar_velocity_weight':10.},.5),
+    'B_yaw5':({'yaw_rate_weight':5.},.5),
+    'B_both_lower':({'planar_velocity_weight':10.,'yaw_rate_weight':5.},.5),
+    'C_torque30':({'torque_tracking_weight':30.},1.), 'D_true_wrench':({},1.)}
+ALL_VARIANTS = {**VARIANTS,**ATTITUDE_VARIANTS,**INTERVENTION_VARIANTS}
 sys.path.insert(0, str(ROOT))
 from scripts.eval_hard_pact_frozen import apply_config, sha_file, tensor_hash, dependency_versions
 
@@ -49,7 +57,15 @@ def freeze_settings(training, checkpoint, variant):
     progress = intervention['snapshot_progress']
     probabilities = intervention_probabilities(progress)
     strength = cfg.intervention_extra_strength_start+(1-cfg.intervention_extra_strength_start)*progress
-    if variant in ATTITUDE_VARIANTS:
+    if variant in INTERVENTION_VARIANTS:
+        if cfg.qp_update_mode!='curriculum_substeps' or not cfg.intervention_extra_strength_enabled:
+            raise ValueError('Intervention sweep requires saved curriculum_substeps with baseline masks')
+        if cfg.contact_acceleration_weight!=.1:raise ValueError('Expected saved stance=0.1; never use attitude-probe preset')
+        overrides,strength=INTERVENTION_VARIANTS[variant]
+        before=asdict(cfg);cfg=replace(cfg,**overrides)
+        assert {k for k,v in asdict(cfg).items() if v!=before[k]} <= set(overrides)
+        alpha,probabilities=1.,(0.,0.,1.)
+    elif variant in ATTITUDE_VARIANTS:
         cfg = replace(cfg,contact_acceleration_weight=.25,torque_tracking_weight=20.,
                       attitude_weight=ATTITUDE_VARIANTS[variant][0])
     elif VARIANTS[variant] is not None:
@@ -81,16 +97,21 @@ class Observer(matched.Observer):
         self.s._hard_pact_grf_post_physics_substep = self.post
         original = qp.solve
         def solve(**data):
+            if args.worker=='D_true_wrench':
+                from scripts.hard_pact_wrench_stress import oracle_input
+                data=oracle_input(self,data)
             result = original(**data)
             self.solve_data, self.result = data, result
             self.calls += 1
-            self.costs(data, result)
+            if not getattr(args,'intervention_sweep',False):self.costs(data, result)
             return result
         qp.solve = solve
         build = qp._build
         def assembly(data):
             self.build = build(data)
             self.assembly_weights = (qp.cfg.contact_acceleration_weight, qp.cfg.torque_tracking_weight)
+            if getattr(args,'intervention_sweep',False):
+                self.assembly_weights+=(qp.cfg.attitude_weight,qp.cfg.planar_velocity_weight,qp.cfg.yaw_rate_weight)
             if self.probe is not None:self.assembly_weights+= (qp.cfg.attitude_weight,)
             return self.build
         qp._build = assembly
@@ -111,6 +132,9 @@ class Observer(matched.Observer):
                 ('terrain_type',s.terrain_types),('base_height',height),('tilt',angle),
                 ('nonreset_error',self.body_velocity()[:,[0,1,5]]-self.command)]:
                 self.record(name,value,control=True)
+            if getattr(args,'intervention_sweep',False):
+                from scripts.hard_pact_intervention_eval import capture_ring
+                capture_ring(self,e.reset_buf.bool() & (e.fail_buf>e.cfg.env.fail_to_terminal_time_s/e.dt))
             if self.probe is not None:
                 self.record('original_reset',e.reset_buf.bool(),control=True)
                 self.record('original_failure',e.fail_buf>e.cfg.env.fail_to_terminal_time_s/e.dt,control=True)
@@ -145,8 +169,12 @@ class Observer(matched.Observer):
             store[name]=torch.full(shape,float('nan') if value.is_floating_point() else 0,
                                   dtype=value.dtype,device=value.device)
         store[name][self.t if control else self.t*4+self.k].copy_(value.detach())
+        if not control and getattr(self.args,'intervention_sweep',False):
+            if not hasattr(self,'history_ring'):self.history_ring={}
+            if name not in self.history_ring:self.history_ring[name]=torch.empty((100,)+tuple(value.shape),dtype=value.dtype,device=value.device)
+            self.history_ring[name][(self.t*4+self.k)%100].copy_(value.detach())
 
-    def costs(self, d, r):
+    def costs(self, d, r, executed=None):
         """Detached residuals with production scales; no new solver calls."""
         import torch
         m,c = self.build,self.qp.cfg
@@ -175,10 +203,19 @@ class Observer(matched.Observer):
                 height=c.height_weight*(height/c.height_acceleration_scale).square(),
                 planar=c.planar_velocity_weight*(vel[:,:2]/c.planar_velocity_scale_m_s).square().sum(-1),
                 yaw=c.yaw_rate_weight*(vel[:,2]/c.yaw_rate_scale_rad_s).square(),
+                torque_residual=(x[:,:12]-d['tau_nom']).norm(dim=-1),
+                grf_residual=(x[:,12:]-force).norm(dim=-1),
                 stance_residual=(contact.square().sum(-1)*stance).sum(-1).sqrt(),
                 attitude_residual=rp.norm(dim=-1),height_residual=height,
                 planar_error=vel[:,:2].norm(dim=-1),yaw_error=vel[:,2].abs())
-        for label,values_ in [('nominal',values(x0,a0)),('candidate',values(x1,a1))]:
+        samples=[('nominal',values(x0,a0)),('candidate',values(x1,a1))]
+        if executed is not None:
+            xe=torch.cat((executed[ids],r.force_world.flatten(1)),-1)
+            ae=(A@xe[...,None]).squeeze(-1)+b
+            samples.append(('execution',values(xe,ae)))
+            from scripts.hard_pact_intervention_eval import trajectory_metrics
+            trajectory_metrics(self,d,r,m,x0,x1,xe,a0,a1,ae)
+        for label,values_ in samples:
             for name,v in values_.items():
                 out=v.new_full((self.e.num_envs,),float('nan'))
                 out[ids]=torch.where(accepted,v,float('nan'))
@@ -199,6 +236,14 @@ class Observer(matched.Observer):
 
     def pre(self):
         import torch
+        if getattr(self.args,'wrench_stress',False) and self.args.worker=='off':
+            super().pre()
+            self.record('baseline',torch.zeros(self.e.num_envs,device=self.e.device,dtype=torch.bool))
+            self.pred_force=self.e._yaw_local_to_world(self.e._qp_control_grf,self.e._current_base_quat_xyzw())
+            return
+        if getattr(self.args,'intervention_sweep',False):
+            from scripts.hard_pact_intervention_eval import pre
+            return pre(self)
         super().pre()
         baseline=((self.e._qp_baseline_selection & (1<<self.k))!=0)
         self.record('baseline',baseline)
@@ -221,6 +266,11 @@ class Observer(matched.Observer):
         import torch
         super().post()
         self.k-=1  # inherited post advances after recording; keep matching slot
+        if getattr(self.args,'wrench_stress',False):
+            self.record('body_velocity_after',self.body_velocity())
+            self.record('applied_wrench',self.s.hard_pact_wrench_at_base_origin_world(self.e._current_sustained_wrench_world))
+            q=self.e._current_base_quat_xyzw();w=self.e._qp_control_wrench
+            self.record('predicted_wrench',torch.cat([self.e._yaw_local_to_world(w[:,None,sl],q)[:,0] for sl in (slice(0,3),slice(3,6))],-1))
         self.record('grf_error',self.pred_force-self.e.grf_processor.raw)
         if self.probe is not None:
             self.record('measured_force_world',self.e.grf_processor.raw)
@@ -264,6 +314,7 @@ class Observer(matched.Observer):
                 if name.startswith('objective_') or name in ('velocity_estimate_error','height_estimate_error','wrench_error','grf_error','stance_slip'):
                     result['diagnostics'][name]=report.finite_stats(a[mask])
             for name in ('torque','grf','stance','attitude','height','planar','yaw','planar_error','yaw_error'):
+                if 'objective_candidate_'+name not in arrays:continue
                 delta=arrays['objective_candidate_'+name]-arrays['objective_nominal_'+name]
                 result['diagnostics']['objective_change_'+name]=report.finite_stats(delta[mask])
                 if name.endswith('error'):
@@ -279,6 +330,14 @@ class Observer(matched.Observer):
                 'No exact physical continuation: fresh episodes sampled from saved terrain distribution.',
                 'No hardware latency measurement; collection timing includes diagnostics and shared host interference.']
             write_json(self.out/'result.json',result)
+            if getattr(self.args,'wrench_stress',False):
+                from scripts.hard_pact_wrench_stress import save_metrics
+                save_metrics(self,arrays,result)
+                if self.args.worker=='off':return
+            if getattr(self.args,'intervention_sweep',False):
+                from scripts.hard_pact_intervention_eval import save
+                save(self,arrays,result)
+                return
             # Bounded 1-second histories, at most 12 failures and 6 controls.
             captures={}; chosen=list(zip(*np.where(failure)))[:12]
             chosen += [(min(count-1,100+200*i),i%self.e.num_envs) for i in range(6)]
@@ -296,6 +355,9 @@ class Observer(matched.Observer):
 
 def worker(args, protocol):
     args.attitude_probe=protocol.get('attitude_probe',False)
+    args.intervention_sweep=protocol.get('intervention_sweep',False)
+    args.wrench_stress=protocol.get('wrench_stress',False)
+    args.load=protocol.get('load','light')
     for key in ('probe_extension','probe_confirmation','capture_cap','probe_source'):
         if key in protocol:setattr(args,key,protocol[key])
     import torch
@@ -309,6 +371,8 @@ def worker(args, protocol):
     from scripts.eval_hard_pact_frozen import build_actor, frozen_policy_actions
     from rsl_rl.algorithms.hard_pact_qp import HardPACTDifferentiableQP
     checkpoint=torch.load(protocol['checkpoint'],map_location='cpu',weights_only=False)
+    if sha_file(Path(protocol['checkpoint']))!=protocol['checkpoint_sha256']:raise RuntimeError('Checkpoint changed')
+    if 'config_sha256' in protocol and sha_file(Path(protocol['config']))!=protocol['config_sha256']:raise RuntimeError('Saved config changed')
     saved=json.loads(Path(protocol['config']).read_text())
     training=saved['training']['resolved']
     task='go2_hard_pact_rss_full_isaaclab'
@@ -337,6 +401,9 @@ def worker(args, protocol):
             if args.attitude_probe:
                 from scripts.hard_pact_recovery_probe import targeted_indices
                 indices,target_plan=targeted_indices(args.probe_source,terrain,args.seed)
+            if args.intervention_sweep:
+                from scripts.hard_pact_intervention_eval import targeted_indices
+                indices,target_plan=targeted_indices(terrain,saved,protocol['failure_evidence'],args.seed)
             s._terrain_levels.copy_(terrain['terrain_levels'][indices].to(env.device))
             s._terrain_types.copy_(terrain['terrain_types'][indices].to(env.device))
             s._env_origins.copy_(s._terrain_origins[s._terrain_levels,s._terrain_types])
@@ -359,6 +426,10 @@ def worker(args, protocol):
                 terrain_source_rows=indices.tolist(),terrain_levels=s.terrain_levels.tolist(),terrain_types=s.terrain_types.tolist(),
                 target_plan=target_plan,
                 environment=class_to_dict(cfg),saved_config=saved,dependencies=dependency_versions(),
+                restored_curriculum=dict(next_iteration=state['next_iteration'],
+                    progress=dict(env.domain_rand_curriculum.progress),
+                    current_wrench_bounds={k:list(env.domain_rand_curriculum.schema[k].range_at(env.domain_rand_curriculum.progress['disturbance']))
+                        for k in ('persistent_force','persistent_vertical_force','persistent_torque','persistent_yaw_torque')}),
                 notes=['Native command/heading/disturbance/reset protocol retained. QP sampler RNG isolated.',
                     'Initial states matched by seed; commands/randomization diverge after asynchronous resets.',
                     'Training terrain geometry and saved empirical joint level/type distribution; no play terrain overrides.',
@@ -366,10 +437,16 @@ def worker(args, protocol):
                     'Bounded numeric trace: <=2000 control steps, 10 envs; no solver matrices/graphs retained.'])
             matched.ARGS=args
             observer=Observer(env,actor,qp,args,manifest)
+            if args.wrench_stress:
+                from scripts.hard_pact_wrench_stress import install
+                install(observer)
+            if args.intervention_sweep:
+                manifest['execution_diagnostics_convention']='Execution costs/constraints hold optimized GRFs fixed; not an executed force measurement or certificate.'
             write_json(observer.out/'manifest.json',manifest)
             observer.start=time.monotonic();torch.cuda.reset_peak_memory_stats()
             for t in range(args.steps):
                 observer.t,observer.k=t,0
+                if args.wrench_stress:observer.tapes.before(t)
                 observer.command=env.commands[:,:3].clone()
                 observer.record('command',observer.command,control=True)
                 obs,history,_,_=env.get_observations()
@@ -408,19 +485,26 @@ def main():
     p.add_argument('--seed',type=int,default=1)
     p.add_argument('--variants',nargs='+',choices=ALL_VARIANTS)
     p.add_argument('--attitude-probe',action='store_true',help='Four targeted seed-1 attitude/probe conditions')
+    p.add_argument('--intervention-sweep',action='store_true',help='Four-solve A/B/C/D sweep; no termination changes')
+    p.add_argument('--wrench-stress',action='store_true',help='Reset-independent evaluation tapes and frozen mechanics')
+    p.add_argument('--load',choices=['light','heavier'],default='light')
+    p.add_argument('--event',default=EVENT,help='Exact event filename identifying the run')
     p.add_argument('--probe-source',type=Path,default=ROOT/'diagnostics/tradeoff11000/full')
     p.add_argument('--probe-extension',type=float,default=.2)
     p.add_argument('--probe-confirmation',type=float,default=.5)
     p.add_argument('--capture-cap',type=int,default=24)
     p.add_argument('--checkpoint',type=Path,help='Explicit immutable checkpoint from the exact event-file run')
     args=p.parse_args();args.output=args.output.resolve()
+    if args.wrench_stress:args.intervention_sweep=True
     if not 1<=args.steps<=2000: p.error('bounded evaluation requires 1..2000 steps')
     if args.worker:
         if os.environ.get('CUDA_VISIBLE_DEVICES')!='1':raise RuntimeError('Physical GPU 1 required')
         return worker(args,json.loads((args.output/'protocol.json').read_text()))
     if args.attitude_probe and args.seeds!=[1]:p.error('Attitude/probe experiment requires --seeds 1')
     if args.capture_cap<0:p.error('capture cap must be nonnegative')
-    if args.variants is None:args.variants=list(ATTITUDE_VARIANTS if args.attitude_probe else VARIANTS)
+    if args.intervention_sweep and args.attitude_probe:p.error('Distinct experiments; do not combine presets')
+    if args.variants is None:args.variants=list(INTERVENTION_VARIANTS)[:4] if args.intervention_sweep else list(ATTITUDE_VARIANTS if args.attitude_probe else VARIANTS)
+    if args.intervention_sweep and not set(args.variants)<=set(INTERVENTION_VARIANTS):p.error('Invalid intervention variant')
     args.output.mkdir(parents=True,exist_ok=True)
     protocol_path=args.output/'protocol.json'
     if protocol_path.exists():
@@ -428,7 +512,7 @@ def main():
         if protocol['steps']!=args.steps or protocol['evaluator_sha256']!=sha_file(Path(__file__)):
             raise RuntimeError('Use new output directory after code/protocol changes')
     else:
-        matches=list((ROOT/'logs').rglob(EVENT))
+        matches=list((ROOT/'logs').rglob(args.event))
         if len(matches)!=1:raise RuntimeError(f'Expected exact event file once; found {matches}')
         run=matches[0].parent
         checkpoint=(args.checkpoint.resolve() if args.checkpoint else
@@ -443,9 +527,27 @@ def main():
             code_sha=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),
             evaluator_sha256=sha_file(Path(__file__)),steps=args.steps,physical_gpu=1,seeds=args.seeds,variants=args.variants,
             attitude_probe=args.attitude_probe,probe_source=str(args.probe_source.resolve()),
+            intervention_sweep=args.intervention_sweep,
+            wrench_stress=args.wrench_stress,load=args.load,
             probe_extension=args.probe_extension,probe_confirmation=args.probe_confirmation,capture_cap=args.capture_cap,
             argv=sys.argv,restart='Completed trials skipped; interrupted trials restart from seed, not exact PhysX.')
+        protocol['config_sha256']=sha_file(Path(protocol['config']))
+        protocol['diagnostic_helper_sha256']=sha_file(ROOT/'scripts/hard_pact_intervention_eval.py')
+        if args.intervention_sweep:
+            from scripts.hard_pact_intervention_eval import failure_evidence
+            protocol['failure_evidence']=failure_evidence(matches[0],protocol['checkpoint_iteration'])
+            protocol['followup_rule']='Preliminary promising: fewer failures, each tracking RMSE <= reference*1.10+0.01, no >0.001 increase in joint violation frequency, no >0.01 Nm max torque excess. Not a significance test.'
+        if args.wrench_stress:
+            protocol['followup_rule']='Rank Stage 1 by failure count, then roll/pitch RMS, then height error RMS, then summed tracking RMSE. No tracking-regression veto. Only seed2 selected-versus-off at light/heavier.'
+            if any(v in args.variants for v in ('C_torque30','D_true_wrench')):
+                protocol['followup_rule']='Seed 3 B/C confirmation only if C offers promising survival/stability with useful tracking. Oracle is diagnostic only; use restored checkpoint envelope.'
+            protocol['tape_helper_sha256']=sha_file(ROOT/'scripts/hard_pact_wrench_stress.py')
         write_json(protocol_path,protocol)
+        import shutil
+        archive=args.output/'sources';archive.mkdir(exist_ok=True)
+        for source in (Path(__file__),ROOT/'scripts/hard_pact_intervention_eval.py',ROOT/'scripts/report_hard_pact_tradeoff.py',Path(protocol['config'])):
+            shutil.copy2(source,archive/source.name)
+        if args.wrench_stress:shutil.copy2(ROOT/'scripts/hard_pact_wrench_stress.py',archive/'hard_pact_wrench_stress.py')
     for seed in args.seeds:
         for variant in args.variants:
             out=args.output/f'{variant}_seed{seed}';out.mkdir(exist_ok=True)
