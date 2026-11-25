@@ -256,6 +256,10 @@ class ComplianceReference:
         from .compliance_sampling import ProfileSampler
         self.sampler=ProfileSampler(cfg,device,dtype)
         self.family_ids=torch.full((n,),-1,device=device,dtype=torch.long)
+        # Evaluation-only snapshots. Off by default: no extra tensor allocation or
+        # filter advancement. Consumers must copy terminal snapshots before reset.
+        self.collect_diagnostics=False
+        self.diagnostics=None
         self.reset(torch.arange(n,device=device))
 
     def reset(self,ids):
@@ -319,8 +323,17 @@ class ComplianceReference:
         gates=1-(1-stiffness)*(1-contributions[0])*(1-contributions[1])*(1-contributions[2])
         gates=gates*active
         equilibrium,_=self.bound_reference(nominal+demand,torch.zeros_like(demand),center,bounds,start=nominal)
+        if self.collect_diagnostics:
+            self.diagnostics={key:value.detach().clone() for key,value in dict(
+                force_task=force,selected_coefficients=gain,
+                dimensional_gain=force.new_tensor(c.ee_gain).expand_as(force),
+                raw_displacement=demand,equilibrium_workspace=equilibrium,
+                nominal_position=nominal,nominal_velocity=nominal_velocity,
+                directional_progress=progress).items()}
         if target_safe is not None:
             equilibrium=target_safe(equilibrium,previous)
+        if self.collect_diagnostics:
+            self.diagnostics['equilibrium_geometry']=equilibrium.detach().clone()
         desired=equilibrium-nominal
         error=self.delta-desired
         b=self.rate+c.omega*error
@@ -332,6 +345,9 @@ class ComplianceReference:
         # Hard path constraints still apply below, so an unsafe goal is not jumped to.
         delta=torch.where(nominal_only[:,None],torch.zeros_like(delta),delta)
         rate=torch.where(nominal_only[:,None],torch.zeros_like(rate),rate)
+        if self.collect_diagnostics:
+            self.diagnostics['filtered_candidate']=(nominal+delta).detach().clone()
+            self.diagnostics['filtered_velocity']=(nominal_velocity+rate).detach().clone()
         position,velocity=self.bound_reference(nominal+delta,nominal_velocity+rate,center,bounds,start=previous)
         if target_safe is not None:
             safe=target_safe(position,previous)
@@ -343,6 +359,9 @@ class ComplianceReference:
         position=torch.where(recovering[:,None],recovered,position)
         recovery_velocity=torch.where(((recovered-nominal).norm(dim=-1)<1e-7)[:,None],nominal_velocity,torch.zeros_like(velocity))
         velocity=torch.where(recovering[:,None],recovery_velocity,velocity)
+        if self.collect_diagnostics:
+            self.diagnostics['accepted_position']=position.detach().clone()
+            self.diagnostics['accepted_velocity']=velocity.detach().clone()
         self.recovering=recovering.detach()
         self.accepted.copy_(position);self.initialized.fill_(True)
         self.delta.copy_(position-nominal)
