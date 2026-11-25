@@ -239,6 +239,9 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
         self._cloner.filter_collisions(
             scene_path, "/World/collisions", paths, global_paths=[GROUND_PATH]
         )
+        # Opt-in evaluation props must exist before PhysX creates its views.
+        factory = getattr(cfg.sim, "evaluation_scene_factory", None)
+        self.evaluation_scene = factory(self) if factory is not None else None
         self._sim.reset()
         self._get_env_origins()
         self._dof_names = list(self._robot.joint_names)
@@ -528,7 +531,10 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
         self.first_loop = True
         if self._use_substep_grf_filtering:
             self._grf_processor.begin_interval()
+        scene = getattr(self, "evaluation_scene", None)
         for _ in range(self._cfg.control.decimation):
+            if scene is not None:
+                scene.before_substep()
             self._apply_external_forces()
             torque = self._compute_torques(actions)
             self.executed_torques = torch.clamp(torque, -1.1 * self.torque_limits, 1.1 * self.torque_limits)
@@ -538,6 +544,8 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
             self._robot.write_data_to_sim()
             self._sim.step(render=False)
             self._robot.update(self._sim_params["dt"])
+            if scene is not None:
+                scene.after_substep(self._sim_params["dt"])
             self._contact_sensors.update(self._sim_params["dt"])
             self._update_ground_contact_forces()
             if getattr(self, "collect_b1z1_bard_interval", False):
@@ -594,6 +602,9 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
     def reset_idx(self, env_ids):
         if env_ids.numel() == 0:
             return
+        scene = getattr(self, "evaluation_scene", None)
+        if scene is not None:
+            scene.reset(env_ids)
         self._robot.reset(env_ids)
         self._contact_sensors.reset(env_ids)
         # Avoid CPU transfers and PhysX property writes for fixed-range runs.

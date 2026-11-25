@@ -163,6 +163,8 @@ class IsaacLabSimulator(Simulator):
             
     def _lab_launcher_args(self):
         launcher_args = {"headless": self._headless, "device": self._device, "multi_gpu": False}
+        if getattr(self._cfg.sim, "evaluation_cameras", False):
+            launcher_args["enable_cameras"] = True
         if bool(getattr(self._cfg.sim, "suppress_backend_warnings", False)):
             # Keep errors visible while quieting repeated Kit/asset warnings.
             launcher_args["kit_args"] = "--/log/level=error --/log/outputStreamLevel=error"
