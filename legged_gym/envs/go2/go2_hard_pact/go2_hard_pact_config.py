@@ -118,7 +118,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         use_domainrand_curriculum = True
         com_rand_z_positive = True
         num_push_steps = 1000
-        push_warmup = 10000
+        push_warmup = 9500  # Absolute earliest disturbance expansion; actual QP completion + settling also gates it.
         num_jumps = 10
 
         randomize_friction = True
@@ -190,7 +190,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
         min_reward_to_step = 0.50
         joint_dynamics_progress_delta = 0.02
         mass_com_progress_delta = 0.01
-        disturbance_progress_delta = 0.005
+        disturbance_progress_delta = 0.0025  # 400 advances at step_interval=10 (~4,000 gate-open iterations).
         use_joint_dynamics_curriculum = False
         use_mass_com_curriculum = False
         use_disturbance_curriculum = True
@@ -460,7 +460,7 @@ class GO2HardPACTCfg(LeggedRobotCfg):
                                   'dof_vel_limits':[-0.1, -1.0],
                                 #   'dof_acc':[-2.5e-08, -2.5e-07]
                                   }
-            curr_steps = 16000
+            curr_steps = 12000
             warmup_steps = 0  
 
 
@@ -648,7 +648,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             # first_plus_random_substep - First plus balanced later solve; every_substep=4, random_one_substep=1 per env/interval.
             'qp_update_mode': 'curriculum_substeps',         # Gated 2 -> 4 solves; random groups each interval, one uniform executed PPO anchor.
             'intervention_settling_iterations': 500,         # After BOTH correction and actor-physics ramps finish.
-            'intervention_ramp_iterations': 8000,             # Gate-open PPO iterations from two solves to every substep.
+            'intervention_ramp_iterations': 7000,             # From iteration ~1,500 to ~8,500 with continuously open gates.
             'intervention_extra_strength_enabled': True,   # Only additional curriculum solves ramp execution strength.
             'intervention_extra_strength_start': 0.25,       # Extra-solve multiplier at progress zero; reaches 1 at completion.
             'intervention_window_iterations': 200,          # Rolling consecutive evidence; disjoint survival-reference updates.
@@ -676,27 +676,27 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             'torque_rate_constraint_weight': 0.0,            # 0 removes QP rate constraints; any positive value enables the hard rate bound.
 
             # Inner objective: nominal torque / GRF tracking and stance acceleration
-            'torque_tracking_weight': 20.0,                  # Inner normalized total-torque tracking weight.
+            'torque_tracking_weight': 15.0,                  # Inner normalized total-torque tracking weight.
             'torque_scale_nm': 40.0,                         # Torque variable/reference normalization scale [Nm].
-            'force_tracking_weight': 1.0,                    # Inner normalized predicted-GRF tracking weight.
+            'force_tracking_weight': 0.5,                    # Inner normalized predicted-GRF tracking weight.
             'force_scale_n': 250.0,                          # Force variable/reference normalization scale [N].
-            'contact_acceleration_weight': 0.1,              # Inner stance-acceleration weight; authoritative final curriculum target.
+            'contact_acceleration_weight': 0.05,             # Inner stance-acceleration weight; authoritative final curriculum target.
             'contact_acceleration_scale_m_s2': 50.0,         # Stance-acceleration residual normalization [m/s^2].
 
             # Inner objective: torso attitude and terrain-relative height
-            'attitude_weight': 0.1,                          # Inner roll/pitch stabilization weight; final curriculum target.
+            'attitude_weight': 0.01,                         # Inner roll/pitch stabilization weight; final curriculum target.
             'attitude_kp': 20.0,                             # Tilt-error gain in desired roll/pitch angular acceleration [1/s^2].
             'attitude_kd': 5.0,                              # Angular-rate damping gain [1/s].
             'attitude_acceleration_scale_rad_s2': 20.0,      # Roll/pitch acceleration residual normalization [rad/s^2].
-            'height_weight': 0.5,                            # Inner height-regulation weight; final curriculum target; 0 skips this objective.
+            'height_weight': 0.01,                           # Inner height-regulation weight; final curriculum target; 0 skips this objective.
             'height_kp': 20.0,                               # Terrain-relative height-error gain [1/s^2].
             'height_kd': 5.0,                                # Predicted world-vertical velocity damping gain [1/s].
             'height_target': None,                           # Target torso height [m]; None uses rewards.base_height_target.
             'height_acceleration_scale': 20.0,               # Vertical-acceleration residual normalization [m/s^2].
 
             # Velocity tracking: independent inner-QP and outer-loss horizons
-            'planar_velocity_weight': 20.0,                  # Inner normalized body-frame planar-velocity tracking weight.
-            'yaw_rate_weight': 10.0,                         # Inner normalized body-frame yaw-rate tracking weight.
+            'planar_velocity_weight': 5.0,                   # Inner normalized body-frame planar-velocity tracking weight.
+            'yaw_rate_weight': 5.0,                          # Inner normalized body-frame yaw-rate tracking weight.
             'planar_velocity_scale_m_s': 1.0,                # Planar-velocity error normalization [m/s].
             'yaw_rate_scale_rad_s': 1.0,                     # Yaw-rate error normalization [rad/s].
             'qp_velocity_objective_horizon_s': 0.020,        # Inner xy/yaw constant-derivative horizon [s]; None uses physics dt.
@@ -724,9 +724,9 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             # Performance-gated inner stance / torso-stability curriculum
             'objective_curriculum_enabled': False,            # Schedule inner weights using local-window tracking recovery.
             'torso_stability_curriculum_enabled': False,      # Include attitude/height in the objective curriculum; stance remains independent.
-            'contact_acceleration_weight_initial': 0.1,      # Matches authoritative final component weight.
-            'attitude_weight_initial': 0.1,                  # Matches authoritative final component weight.
-            'height_weight_initial': None,                   # Initial height weight; None uses 25% of height_weight.
+            'contact_acceleration_weight_initial': 0.05,     # Matches authoritative final component weight.
+            'attitude_weight_initial': 0.01,                 # Matches authoritative final component weight.
+            'height_weight_initial': 0.01,                   # Matches authoritative final component weight.
             'objective_curriculum_start': None,              # Earliest absolute iteration for progression; None follows execution-ramp completion.
             'objective_curriculum_progress_delta': 0.05,     # Fraction of initial-to-final weight range added per successful advancement.
             'objective_curriculum_step_interval': 10,        # Minimum PPO iterations between objective-weight increases.
@@ -828,7 +828,7 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
         policy_class_name = 'ActorCritic_HardPACT'
         algorithm_class_name = 'PPO_HardPACT'
         num_steps_per_env = 24
-        max_iterations = 20000
+        max_iterations = 16000  # Total absolute PPO budget, not additional updates on resume.
         grf_dim = 12
         run_name = 'hardpact_50hz_noboot'
         experiment_name = 'go2_pact_rough'

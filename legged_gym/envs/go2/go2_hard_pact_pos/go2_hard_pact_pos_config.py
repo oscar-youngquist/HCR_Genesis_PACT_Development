@@ -2,6 +2,7 @@
 
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
 from legged_gym.envs.go2.go2_hard_pact.transition import DISTURBANCE_CRITIC_DIM
+from legged_gym.envs.go2.go2_hard_pact.go2_hard_pact_config import GO2HardPACTCfg, GO2HardPACTCfgPPO
 
 class GO2HardPACTPosCfg(LeggedRobotCfg):
 
@@ -33,7 +34,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         restitution = 0.0
         border_size = 20.0
         curriculum = True
-        curriculum_upward_delay_iterations = 250  # Absolute PPO iteration; 0 disables delay.
+        curriculum_upward_delay_iterations = GO2HardPACTCfg.terrain.curriculum_upward_delay_iterations
         obtain_terrain_info_around_feet = True
         measure_heights = True
         measured_points_x = [-0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
@@ -106,7 +107,7 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         use_domainrand_curriculum = False
         com_rand_z_positive = False
         num_push_steps = 500
-        push_warmup = 3000
+        push_warmup = GO2HardPACTCfg.domain_rand.push_warmup
 
         randomize_friction = True
         friction_range = [0.2, 1.8]
@@ -168,15 +169,17 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
         joint_damping_range_end = [0.3, 0.4]
         joint_damping_range_start = [0.3, 0.4]
 
-        best_reward_window = 200
-        best_reward_quantile = 0.9
-        recovery_ratio = 0.9
-        step_interval = 10
-        reward_ema_alpha = 0.05
-        min_reward_to_step = 0.6
-        joint_dynamics_progress_delta = 0.02
-        mass_com_progress_delta = 0.01
-        disturbance_progress_delta = 0.01
+        # Share schedule/gate parameters, not this task's neutral feature switches
+        # or physical ranges. No dependency on a QP-completion signal in Pos.
+        best_reward_window = GO2HardPACTCfg.domain_rand.best_reward_window
+        best_reward_quantile = GO2HardPACTCfg.domain_rand.best_reward_quantile
+        recovery_ratio = GO2HardPACTCfg.domain_rand.recovery_ratio
+        step_interval = GO2HardPACTCfg.domain_rand.step_interval
+        reward_ema_alpha = GO2HardPACTCfg.domain_rand.reward_ema_alpha
+        min_reward_to_step = GO2HardPACTCfg.domain_rand.min_reward_to_step
+        joint_dynamics_progress_delta = GO2HardPACTCfg.domain_rand.joint_dynamics_progress_delta
+        mass_com_progress_delta = GO2HardPACTCfg.domain_rand.mass_com_progress_delta
+        disturbance_progress_delta = GO2HardPACTCfg.domain_rand.disturbance_progress_delta
         use_joint_dynamics_curriculum = True
         use_mass_com_curriculum = False
         use_disturbance_curriculum = False
@@ -424,14 +427,17 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
                                   'ang_vel_xy': [-0.05, -0.1], 
                                   'dof_close_to_default': [-0.05, -0.1], 
                                   'torque_limits': [-0.0001, -0.01]}
-            curr_steps = 1
-            warmup_steps = 4000
+            curr_steps = GO2HardPACTCfg.rewards.reward_curriculum.curr_steps
+            warmup_steps = GO2HardPACTCfg.rewards.reward_curriculum.warmup_steps
 
     class commands(LeggedRobotCfg.commands):
         curriculum = True
-        curriculum_threshold = 0.8
-        curriculum_patience_iterations = 10  # consecutive PPO rollouts; 0 = legacy reset-based updates
-        max_curriculum = 1.0
+        curriculum_threshold = GO2HardPACTCfg.commands.curriculum_threshold
+        curriculum_patience_iterations = GO2HardPACTCfg.commands.curriculum_patience_iterations
+        max_curriculum = GO2HardPACTCfg.commands.max_curriculum
+        max_curriculum_lin_vel_x = GO2HardPACTCfg.commands.max_curriculum_lin_vel_x
+        max_curriculum_lin_vel_y = GO2HardPACTCfg.commands.max_curriculum_lin_vel_y
+        max_curriculum_ang_vel_yaw = GO2HardPACTCfg.commands.max_curriculum_ang_vel_yaw
         num_commands = 4
         resampling_time = 10.0
         heading_command = True
@@ -548,7 +554,7 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
         policy_class_name = 'ActorCritic_HardPACT_Pos'
         algorithm_class_name = 'PPO_PACT_Pos'
         num_steps_per_env = 24
-        max_iterations = 5000
+        max_iterations = GO2HardPACTCfgPPO.runner.max_iterations
         grf_dim = 12
         run_name = 'pact_posboot_100hz_grf'
         experiment_name = 'go2_pact_pos_rough'

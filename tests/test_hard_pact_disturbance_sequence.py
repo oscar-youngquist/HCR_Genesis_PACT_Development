@@ -98,7 +98,7 @@ def test_step_cadence_and_partial_window_checkpoint():
     for i in range(26):
         if advance(c,i): changes.append(i)
     assert changes == [4,14,24]
-    assert c.progress['disturbance'] == pytest.approx(.015)
+    assert c.progress['disturbance'] == pytest.approx(3*cfg.domain_rand.disturbance_progress_delta)
     resumed=HardPACTDomainRandCurriculum(cfg); resumed.load_state_dict(c.state_dict())
     assert resumed.sequence.window_iterations == 1
     for i in range(26,30):
