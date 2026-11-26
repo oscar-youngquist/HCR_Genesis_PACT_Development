@@ -109,6 +109,12 @@ audit checks both application modes, signed axes, combined loads, randomized
 offsets, replacement and clearing against composer buffers (absolute tolerance
 2e-5 N/Nm), without stepping physics during the audit.
 
+For subsequent corrected-load comparisons, diagnostic acceptance is deliberately
+permissive: the startup buffer audit allows 0.01 N/Nm; the full-rollout delivery
+check allows `0.01 + 0.001 * abs(expected component)` in N or Nm. Raw errors and
+the tolerance are saved, and nonfinite values still fail. These are evaluation
+checks only, not production training, QP solver, or feasibility tolerances.
+
 Executed validation: 81 focused tests passed; standing and walking each completed
 300 controls on physical GPU 1 with zero resets. Both 160-case startup audits
 had maximum buffer error 2.861e-6 N/Nm; the direct installed position-kernel

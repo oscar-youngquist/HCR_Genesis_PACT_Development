@@ -275,6 +275,21 @@ class Observer(matched.Observer):
             compact('optimized_torque',r.tau_safe)
 
     def pre(self):
+        self._pre()
+        if getattr(self.args,'audit_wrench_application',False):
+            import torch
+            from scripts.hard_pact_shadow_estimation import rotate
+            q=self.s.hard_pact_base_quat_xyzw()
+            c=self.s._robot.permanent_wrench_composer
+            requested=self.e._current_sustained_wrench_world
+            expected=self.s.hard_pact_wrench_at_base_origin_world(requested)
+            delivered=torch.cat((rotate(q,c.composed_force_as_torch[:,self.s._base_link_index]),
+                                 rotate(q,c.composed_torque_as_torch[:,self.s._base_link_index])),-1)
+            self.record('requested_wrench_world',requested)
+            self.record('expected_wrench_base_origin_world',expected)
+            self.record('delivered_wrench_base_origin_world',delivered)
+
+    def _pre(self):
         import torch
         if getattr(self.args,'wrench_stress',False) and self.args.worker=='off':
             super().pre()
@@ -354,6 +369,17 @@ class Observer(matched.Observer):
                 note='Warmed device-event copy timing; excludes archive compression/offline solves. Shared GPU interference possible.'))
         if complete:
             result=report.summarize(self.out)
+            if getattr(self.args,'audit_wrench_application',False):
+                error=arrays['delivered_wrench_base_origin_world']-arrays['expected_wrench_base_origin_world']
+                maximum=float(np.abs(error).max())
+                # Permissive diagnostic-only check, not a QP/physics tolerance.
+                # Preserve raw discrepancies so a passing check cannot hide them.
+                tolerance=.01+1e-3*np.abs(arrays['expected_wrench_base_origin_world'])
+                result['wrench_delivery_audit']=dict(max_abs_error=maximum,
+                    per_axis_max_abs_error=np.abs(error).max(axis=(0,1)).tolist(),
+                    atol=.01,rtol=1e-3,max_tolerance_ratio=float((np.abs(error)/tolerance).max()),samples=int(np.prod(error.shape[:-1])),
+                    convention='Pre-physics world axes, moment about live base-link origin; raw request retained separately.')
+                assert np.isfinite(error).all() and (np.abs(error)<=tolerance).all(), result['wrench_delivery_audit']
             reset=arrays['control_reset'].astype(bool)
             failure=arrays['control_failure'].astype(bool)&reset
             result['failure_per_env_s']=float(failure.sum()/(count*self.e.num_envs*self.e.dt))
@@ -417,7 +443,7 @@ def worker(args, protocol):
     args.load=protocol.get('load','light')
     for key in ('probe_extension','probe_confirmation','capture_cap','probe_source',
                 'preservation_visual','recovery_diagnostic','probe_duration','probe_cap',
-                'probe_hysteresis_rad','probe_hysteresis_m','video','discard_video','shadow_estimation','momentum_sanity','momentum_sanity_correct_wrench'):
+                'probe_hysteresis_rad','probe_hysteresis_m','video','discard_video','shadow_estimation','momentum_sanity','momentum_sanity_correct_wrench','audit_wrench_application'):
         if key in protocol:setattr(args,key,protocol[key])
     import torch
     from legged_gym.scripts.train_hard_pact import prepare_solver_runtime
@@ -510,6 +536,10 @@ def worker(args, protocol):
                     'Bounded numeric trace: <=2000 control steps, 10 envs; no solver matrices/graphs retained.'])
             matched.ARGS=args
             observer=Observer(env,actor,qp,args,manifest)
+            if args.audit_wrench_application:
+                from scripts.hard_pact_momentum_sanity import audit_application
+                assert s.hard_pact_wrench_application_semantics=='base_origin_explicit_moment_v2'
+                manifest['production_wrench_audit']=audit_application(s)
             if args.wrench_stress:
                 from scripts.hard_pact_wrench_stress import install
                 install(observer)
@@ -583,6 +613,7 @@ def main():
     p.add_argument('--video',action='store_true')
     p.add_argument('--discard-video',action='store_true',help='Match video runtime/render calls, discard frames without encoding')
     p.add_argument('--shadow-estimation',action='store_true',help='Eval-only owned nominal mechanics/velocity capture for causal offline inverse dynamics')
+    p.add_argument('--audit-wrench-application',action='store_true',help='Lightweight pre-physics request/label/composer capture; supports QP-off')
     p.add_argument('--momentum-sanity',choices=['standing','walking'],help='Eval-only nominal mechanics and flat terrain with known load pulses')
     p.add_argument('--momentum-sanity-correct-wrench',action='store_true',help='Sanity ONLY: compose point-force moment explicitly to bypass installed composer torque-overwrite bug')
     p.add_argument('--checkpoint',type=Path,help='Explicit immutable checkpoint from the exact event-file run')
@@ -637,6 +668,7 @@ def main():
             probe_hysteresis_rad=args.probe_hysteresis_rad,probe_hysteresis_m=args.probe_hysteresis_m,video=args.video,
             discard_video=args.discard_video,shadow_estimation=args.shadow_estimation,momentum_sanity=args.momentum_sanity,
             momentum_sanity_correct_wrench=args.momentum_sanity_correct_wrench,
+            audit_wrench_application=args.audit_wrench_application,
             argv=sys.argv,restart='Completed trials skipped; interrupted trials restart from seed, not exact PhysX.')
         protocol['config_sha256']=sha_file(Path(protocol['config']))
         protocol['diagnostic_helper_sha256']=sha_file(ROOT/'scripts/hard_pact_intervention_eval.py')
