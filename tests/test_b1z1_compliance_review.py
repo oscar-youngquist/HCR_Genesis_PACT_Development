@@ -60,6 +60,7 @@ def actual_urdf_task():
     task.bounds=k['bounds'];task.command_limits=k['command_limits']
     task.center=lambda:base;task.nominal=lambda advance:(ee,torch.zeros_like(ee))
     task.wrench_sum=ee.new_zeros(3,3,3);task.wrench_count=ee.new_zeros(3)
+    task.cap_counts=ee.new_zeros(3,2)
     task.recovery_failed=torch.zeros(3,dtype=torch.bool)
     task.recovery_rejections=torch.zeros(3,4,4,dtype=torch.bool)
     task.workspace_clearance=segment_box

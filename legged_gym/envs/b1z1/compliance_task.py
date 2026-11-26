@@ -91,6 +91,7 @@ class ComplianceTask:
         self.coverage=DisturbanceCoverage(getattr(env.cfg.commands,'compliance_disturbance_mode_weights',None),env.num_envs,env.device)
         self.wrench_sum=torch.zeros(env.num_envs,3,3,device=env.device)
         self.wrench_count=torch.zeros(env.num_envs,device=env.device)
+        self.cap_counts=torch.zeros(env.num_envs,2,device=env.device)
         self.arm_ids=sim._arm_dof_cfg_ids
         self.geometry=RobotGeometry(env.cfg.asset.file.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR),
             env.cfg.asset.dof_names,self.arm_ids,env.cfg.asset.base_name,env.cfg.asset.gripper_name,
@@ -116,6 +117,7 @@ class ComplianceTask:
         self.reference.reset(ids)
         self.coverage.reset(ids)
         self.wrench_sum[ids]=0;self.wrench_count[ids]=0
+        self.cap_counts[ids]=0
         if self.target is not None:
             # Do not mutate the terminal replay snapshot in self.interval.
             self.target.position[ids]=self.nominal(0)[0][ids]
@@ -236,6 +238,9 @@ class ComplianceTask:
                     local[:,2]>=env.underground_limit),-1)
                 self.recovery_rejections[:,index]=~checks & recovering[:,None]
                 valid=checks.all(-1)
+                cap=getattr(c,'max_offset_norm',None)
+                if cap is not None:
+                    valid &= (point-nominal).norm(dim=-1)<=cap+1e-6
                 selected=torch.where((valid&~found)[:,None],point,selected);found |= valid
             self.recovery_failed.copy_(recovering & ~found)
             # A workspace-valid numerical placeholder, NOT a certified target.
@@ -254,6 +259,10 @@ class ComplianceTask:
             q=q,limits=limits,jacobian=j,collision_clearance=clear,dt=env.dt,target_safe=safe,
             measured_position=measured,torso_wrench=direct,collision_path_gate=path_gate,
             recovery_anchor=recovery_anchor,collision_start=start_clear)
+        # No feasible intersection is an explicit per-environment termination,
+        # never a silently accepted out-of-envelope training target.
+        self.recovery_failed |= self.reference.constraint_invalid
+        self.cap_counts+=torch.stack((self.reference.cap_active,self.reference.constraint_invalid),-1)
         self.wrench_sum+=torch.stack((self.target.torso_wrench,self.target.ee_wrench,self.target.combined_wrench),1)
         self.wrench_count+=1
         target_world=world_position(self.target.position,sim.base_pos,yaw)
@@ -280,6 +289,8 @@ class ComplianceTask:
                for j,axis in enumerate(('fx_N','fy_N','tz_Nm'))}
         stats['compliance_wrench/interval_count']=count
         stats['compliance_recovery/failure_fraction']=self.recovery_failed[ids].float().mean()
+        stats['compliance_offset_cap/active_fraction']=self.cap_counts[ids,0].sum()/count.clamp_min(1)
+        stats['compliance_offset_cap/invalid_fraction']=self.cap_counts[ids,1].sum()/count.clamp_min(1)
         for j,name in enumerate(('workspace','ee_geometry','forbidden_box','ground')):
             stats[f'compliance_recovery/{name}_rejected_fraction']=self.recovery_rejections[ids,:,j].any(-1).float().mean()
         if self.coverage.weights is not None:

@@ -730,6 +730,9 @@ class _IsaacLabSimulatorB1Z1(IsaacLabSimulator):
         push = (self.common_step_counter % push_steps) == 0
         wrench = (self.common_step_counter % wrench_steps) == 0
         vertical = (self.common_step_counter % vert_steps) == 0
+        mask=getattr(self,'external_push_mask',None)
+        if mask is not None:
+            push &= mask; wrench &= mask; vertical &= mask
         if not torch.any(push | wrench | vertical):
             return
         velocity = self._robot.data.root_link_vel_w.clone()

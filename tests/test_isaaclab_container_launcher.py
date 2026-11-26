@@ -69,6 +69,15 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("SIM=isaaclab", result.stdout)
 
+    def test_pilot_continuation_script_mode(self):
+        entry='b1z1_pact_continue_unity.sh'
+        (Path(self.env['REPO'])/'legged_gym/scripts'/entry).touch()
+        result=self.run_launcher('script',entry,'--run','/workspace/repo/run with spaces',
+                                 '--num-envs','4096','--iterations','50','--output-dir','/output/continuation')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('CVD=1 SIM=isaaclab_b1z1_pact',result.stdout)
+        self.assertIn('--run\n/workspace/repo/run with spaces\n',result.stdout)
+
     def test_b1z1_unity_launchers_preserve_existing_conventions(self):
         fake_python = Path(self.tmp.name) / "python"
         fake_python.write_text('#!/bin/bash\nprintf "CVD=%s SIM=%s\\n" "$CUDA_VISIBLE_DEVICES" "$SIMULATOR"\nprintf "%s\\n" "$@"\n')

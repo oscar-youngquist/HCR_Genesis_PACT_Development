@@ -63,6 +63,8 @@ class B1Z1PACT(LeggedRobot):
 
     def __init__(self, cfg, sim_params, sim_device, headless):
         from legged_gym.envs.b1z1.compliance_task import configure, enabled, ComplianceTask
+        from legged_gym.envs.b1z1.pilot_interactions import configure as configure_interactions
+        configure_interactions(cfg)
         configure(cfg)
         self.cfg = cfg
         self.init_done = False
@@ -73,6 +75,10 @@ class B1Z1PACT(LeggedRobot):
         BaseTask.__init__(self, cfg, sim_params, sim_device, headless)
         self._init_buffers()
         self.compliance = ComplianceTask(self) if enabled(cfg) else None
+        self.interactions = None
+        if getattr(getattr(cfg,'pilot_interactions',None),'enabled',False):
+            from legged_gym.envs.b1z1.pilot_interactions import Interactions
+            self.interactions = Interactions(self)
         self._prepare_reward_function()
         self.init_done = True
 
@@ -94,6 +100,9 @@ class B1Z1PACT(LeggedRobot):
 
     def step(self, actions):
         """Apply actions, simulate, and return the PACT-style env tuple."""
+        if getattr(self,'interactions',None) is not None and self.interactions.cfg.diagnostics:
+            self.candidate_eta_start=self.compliance.reference.eta.clone()
+            self.candidate_command_start=self.commands[:,:3].clone()
         invalidate_force_adjusted_ee_target_cache(self)
         actions = self._pre_sim_step(actions)
 
@@ -417,6 +426,15 @@ class B1Z1PACT(LeggedRobot):
             self.time_out_buf &= ~failed
             self.extras["compliance_recovery_failed"] = failed.clone()
             self.extras["compliance_recovery_rejections"] = self.compliance.recovery_rejections.clone()
+        if getattr(self,'interactions',None) is not None:
+            self.interactions.record()
+            recorder=getattr(self,'candidate_recorder',None)
+            if recorder is not None:
+                from legged_gym.envs.b1z1.pilot_continuation import measurements
+                snapshot=measurements(self)
+                snapshot['scenario_family']=self.interactions.family.detach().clone()
+                # reset_buf is assigned below; use this interval's outcome.
+                recorder.add(snapshot,~(self.fail_buf | self.time_out_buf),self.compliance.profile)
         self.reset_buf = self.fail_buf | self.time_out_buf
 
     def reset_idx(self, env_ids):
@@ -450,7 +468,9 @@ class B1Z1PACT(LeggedRobot):
         episode_height_min_fail_rate = self.height_min_fail_buf[env_ids].float().mean()
         episode_height_max_fail_rate = self.height_max_fail_buf[env_ids].float().mean()
 
+        self._interaction_resetting=True
         self._resample_commands(env_ids)
+        self._interaction_resetting=False
         self._resample_ee_goal(env_ids, is_init=True)
         self._reset_dofs(env_ids)
         self._reset_root_states(env_ids)
@@ -518,6 +538,12 @@ class B1Z1PACT(LeggedRobot):
 
         self.extras["episode"] = {}
         self.extras["episode"].update(episode_compliance_wrenches)
+        if getattr(self,'interactions',None) is not None:
+            from legged_gym.envs.b1z1.pilot_interactions import FAMILIES
+            for family,name in enumerate(FAMILIES):
+                self.extras['episode']['interaction/'+name+'_fraction']=(self.interactions.family[env_ids]==family).float().mean()
+            self.extras['episode']['interaction/setup_rejected_fraction']=self.interactions.setup_rejected[env_ids].float().mean()
+            self.interactions.reset(env_ids)
         if getattr(self, "compliance", None) is not None:
             reference = self.compliance.reference
             family_ids = reference.family_ids[env_ids]
@@ -931,9 +957,18 @@ class B1Z1PACT(LeggedRobot):
         self._step_contact_targets()
         self.update_curr_ee_goal()
         if self.cfg.domain_rand.push_robots:
+            self.simulator.external_push_mask=(~self.interactions.controlled
+                if getattr(self,'interactions',None) is not None else None)
             self.simulator.push_robots()
 
     def _resample_commands(self, env_ids):
+        interaction=getattr(self,'interactions',None)
+        if interaction is not None and not getattr(self,'_interaction_resetting',False):
+            # Reset-time native sampling occurs before the new descriptor. During
+            # a controlled episode, no unrelated command/goal changes occur.
+            active=interaction.controlled[env_ids] & (self.episode_length_buf[env_ids]>0)
+            interaction.keep_commands(env_ids[active])
+            env_ids=env_ids[~active]
         if len(env_ids) == 0:
             return
         # Command slots 0:3 are base x/y/yaw velocity commands.
@@ -1157,7 +1192,9 @@ class B1Z1PACT(LeggedRobot):
         cycle_time = self.cfg.rewards.cycle_time
         standing_mask = ~self.get_walking_cmd_mask()
         self.gait_indices = torch.remainder(self.gait_indices + self.dt / cycle_time, 1.0)
-        self.gait_indices[standing_mask] = 0.0
+        if not (getattr(getattr(self.cfg,'pilot_interactions',None),'enabled',False)
+                and self.cfg.pilot_interactions.continuous_clock):
+            self.gait_indices[standing_mask] = 0.0
 
     def _get_phase(self):
         """Return the persistent UniFP gait phase in [0, 1)."""
@@ -1478,6 +1515,8 @@ class B1Z1PACT(LeggedRobot):
             self.force_target_gripper_ext[env_ids_all] = 0.0
         from legged_gym.envs.b1z1.compliance_task import mask_disturbance
         mask_disturbance(self, self.ee_force_ext_world, env_ids_all, ee=True)
+        if getattr(self,'interactions',None) is not None:
+            self.interactions.apply(self.ee_force_ext_world,env_ids_all,True)
         if hasattr(self.simulator, "apply_ee_force"):
             self.simulator.apply_ee_force(self.ee_force_ext_world)
 
@@ -1508,6 +1547,8 @@ class B1Z1PACT(LeggedRobot):
             self.force_target_base_ext[env_ids_all] = 0.0
         from legged_gym.envs.b1z1.compliance_task import mask_disturbance
         mask_disturbance(self, self.base_force_ext_world, env_ids_all, ee=False)
+        if getattr(self,'interactions',None) is not None:
+            self.interactions.apply(self.base_force_ext_world,env_ids_all,False)
         if hasattr(self.simulator, "apply_base_force"):
             self.simulator.apply_base_force(self.base_force_ext_world)
         if self.cfg.commands.apply_base_external_torques:
@@ -1533,6 +1574,8 @@ class B1Z1PACT(LeggedRobot):
             self.selected_env_ids_base_torque_ext[env_ids_all] = False
             self.force_target_base_torque_ext[env_ids_all] = 0.0
         mask_disturbance(self, self.base_torque_ext_world, env_ids_all, ee=False)
+        if getattr(self,'interactions',None) is not None:
+            self.interactions.apply(self.base_torque_ext_world,env_ids_all,False)
         if hasattr(self.simulator, "apply_base_torque"):
             self.simulator.apply_base_torque(self.base_torque_ext_world)
 
@@ -2377,7 +2420,14 @@ class B1Z1PACT(LeggedRobot):
         first_contact = (self.feet_air_time > 0.) * contact_filt
         self.feet_air_time += self.dt
         rew_airTime = torch.clamp(torch.sum((self.feet_air_time - 0.18) * first_contact, dim=1), min=0.0)  # reward only on first contact with the ground
-        rew_airTime *= torch.norm(self.commands[:, :3], dim=1) > 0.1  # no reward for zero command
+        if (getattr(getattr(self.cfg,'pilot_interactions',None),'enabled',False)
+                and self.cfg.pilot_interactions.reference_air_time):
+            from legged_gym.envs.b1z1.pilot_continuation import walking_mask
+            target=self.compliance.target
+            command=self.commands[:,:3] if target is None else target.base
+            rew_airTime *= walking_mask(command,self.cfg.commands)
+        else:
+            rew_airTime *= torch.norm(self.commands[:, :3], dim=1) > 0.1
         self.feet_air_time *= (~contact_filt).float()
         return rew_airTime
 

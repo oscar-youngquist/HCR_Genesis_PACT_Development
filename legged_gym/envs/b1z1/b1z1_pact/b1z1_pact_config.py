@@ -3,10 +3,16 @@ import numpy as np
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
 from legged_gym.envs.b1z1.rejection_curriculum import RejectionCurriculumDefaults
 from legged_gym.envs.b1z1.directional_compliance import ComplianceCfg
+from legged_gym.envs.b1z1.pilot_interactions import InteractionCfg
 
 class B1Z1PACTCfg(LeggedRobotCfg):
+    class pilot_interactions(InteractionCfg):
+        pass
+
     class compliance(ComplianceCfg):
         enabled = True  # Opt-in: profile-conditioned actor; requires a matching checkpoint.
+        max_offset_norm = .30  # Hard task-frame Euclidean reference envelope [m].
+        base_gain = [.060, .040, .015]  # Planar admittance changed; yaw unchanged.
 
     use_force_shifted_target = False  # Disturbance rejection tracks nominal trajectories.
     seed = 1                                                                            # Random seed for reproducible initialization.

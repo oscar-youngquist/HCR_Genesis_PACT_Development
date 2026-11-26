@@ -43,6 +43,7 @@ dist/
 *.pt
 *.json
 *.jsonl
+!docs/pilot_interaction_validation.json
 # JetBrains IDE
 .idea/
 

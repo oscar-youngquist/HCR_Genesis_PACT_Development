@@ -7,6 +7,22 @@ through the inner-radius hole, including when both endpoints are admissible.
 import torch
 
 
+def offset_prefix(start, end, nominal, radius):
+    """First exit from the convex offset ball, along an already allowed path.
+
+    The caller must establish an admissible start (or explicitly recover).
+    Shortening a collision/workspace-safe prefix does not invent a new path.
+    """
+    p, d = start-nominal, end-start
+    a = d.square().sum(-1)
+    b = (p*d).sum(-1)
+    c = p.square().sum(-1)-radius**2
+    root = (-b+(b.square()-a*c).clamp_min(0).sqrt())/a.clamp_min(1e-20)
+    outside = (end-nominal).norm(dim=-1)>radius
+    alpha = torch.where(outside, root.clamp(0,1), torch.ones_like(a))
+    return start+alpha[:,None]*d, outside
+
+
 def feasible(position, center, bounds):
     from .directional_compliance import chart
     s=chart(position-center,bounds)

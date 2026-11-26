@@ -1,0 +1,586 @@
+{
+  "schema_version": 1,
+  "branch": "legged_manip_diff_comp",
+  "git_revision": "4146221784c7fbf588af101010c4648148ea0ce7",
+  "source_dirty": true,
+  "scope": "PACT-derived tasks inherit settings; UniFP unchanged; FACET explicitly opts out. GPU smoke is PILOT only.",
+  "tests": {
+    "passed": 100,
+    "skipped": 2,
+    "skipped_reason": "CUDA-dependent cases skipped in CPU test process; separate real GPU smoke executed",
+    "python_files_ast_checked": 16,
+    "shell_syntax": "passed",
+    "git_diff_check": "passed",
+    "unity_dispatch": "mocked only"
+  },
+  "hardware": {
+    "gpu": "cuda:1",
+    "name": "NVIDIA GeForce RTX 4090"
+  },
+  "training_smoke": {
+    "directory": "analysis/pilot_interactions_smoke_verified",
+    "checkpoint": "/home/oyoungquist/Research/Genesis_Development/HCR_legged_manip/analysis/pilot_candidate/rerun_20261125_194754/training/model_24201.pt",
+    "checkpoint_sha256": "7f01a75b91a3e1a1d111f49662fed4ed04b58d93bba011aef68c91db06c13cbd",
+    "start_iteration": 24201,
+    "completed_updates": 50,
+    "num_envs": 4096,
+    "interaction_budget": 4915200,
+    "training_seed": 1,
+    "optimizer_restored": true,
+    "force_curriculum_beta": 1.0,
+    "nonfinite_checked_actor_critic_gradient_elements": 0.0,
+    "nonfinite_exported_scalars": 0,
+    "max_offset_m": 0.29966890811920166,
+    "family_statistics": {
+      "yielding": {
+        "samples": 1241413.0,
+        "active": 141790.0,
+        "offset_ge15": 98237.0,
+        "offset_ge20": 38208.0,
+        "offset_ge25": 0.0,
+        "cap_violation": 0.0,
+        "cap_active": 0.0,
+        "recovery_failed": 0.0,
+        "base_clipped": 602.0,
+        "ample_gate_nonzero": 5364.0,
+        "ample_base_nonzero": 13715.0,
+        "restricted_gate_active": 2515.0,
+        "release_samples": 481163.0,
+        "release_offset_sum": 1634.31494140625,
+        "release_base_sum": 282.2142028808594,
+        "failed": 0.0,
+        "episode_assignments_including_initial": 2060.0,
+        "offset_ge15_per_active_sample": 0.6928344735171733,
+        "offset_ge20_per_active_sample": 0.2694689329289795,
+        "offset_ge25_per_active_sample": 0.0,
+        "ample_gate_nonzero_per_active_sample": 0.03783059454122294,
+        "ample_base_nonzero_per_active_sample": 0.09672755483461457
+      },
+      "protected": {
+        "samples": 1242231.0,
+        "active": 141932.0,
+        "offset_ge15": 0.0,
+        "offset_ge20": 0.0,
+        "offset_ge25": 0.0,
+        "cap_violation": 0.0,
+        "cap_active": 0.0,
+        "recovery_failed": 0.0,
+        "base_clipped": 68462.0,
+        "ample_gate_nonzero": 141932.0,
+        "ample_base_nonzero": 90141.0,
+        "restricted_gate_active": 141932.0,
+        "release_samples": 481451.0,
+        "release_offset_sum": 6.444307804107666,
+        "release_base_sum": 5382.21533203125,
+        "failed": 0.0,
+        "episode_assignments_including_initial": 2060.0,
+        "offset_ge15_per_active_sample": 0.0,
+        "offset_ge20_per_active_sample": 0.0,
+        "offset_ge25_per_active_sample": 0.0,
+        "ample_gate_nonzero_per_active_sample": 1.0,
+        "ample_base_nonzero_per_active_sample": 0.6350999069977172
+      },
+      "ample": {
+        "samples": 744094.0,
+        "active": 84654.0,
+        "offset_ge15": 58738.0,
+        "offset_ge20": 23583.0,
+        "offset_ge25": 0.0,
+        "cap_violation": 0.0,
+        "cap_active": 0.0,
+        "recovery_failed": 0.0,
+        "base_clipped": 216.0,
+        "ample_gate_nonzero": 2686.0,
+        "ample_base_nonzero": 7111.0,
+        "restricted_gate_active": 1264.0,
+        "release_samples": 288992.0,
+        "release_offset_sum": 997.0289916992188,
+        "release_base_sum": 146.47064208984375,
+        "failed": 0.0,
+        "episode_assignments_including_initial": 1232.0,
+        "offset_ge15_per_active_sample": 0.6938597112953907,
+        "offset_ge20_per_active_sample": 0.2785810475582961,
+        "offset_ge25_per_active_sample": 0.0,
+        "ample_gate_nonzero_per_active_sample": 0.031729156330474635,
+        "ample_base_nonzero_per_active_sample": 0.08400075601861696
+      },
+      "restricted": {
+        "samples": 707550.0,
+        "active": 79748.0,
+        "offset_ge15": 0.0,
+        "offset_ge20": 0.0,
+        "offset_ge25": 0.0,
+        "cap_violation": 0.0,
+        "cap_active": 0.0,
+        "recovery_failed": 0.0,
+        "base_clipped": 29498.0,
+        "ample_gate_nonzero": 79748.0,
+        "ample_base_nonzero": 38972.0,
+        "restricted_gate_active": 79748.0,
+        "release_samples": 269852.0,
+        "release_offset_sum": 187.21002197265625,
+        "release_base_sum": 2740.387939453125,
+        "failed": 0.0,
+        "episode_assignments_including_initial": 1209.0,
+        "offset_ge15_per_active_sample": 0.0,
+        "offset_ge20_per_active_sample": 0.0,
+        "offset_ge25_per_active_sample": 0.0,
+        "ample_gate_nonzero_per_active_sample": 1.0,
+        "ample_base_nonzero_per_active_sample": 0.4886893715202889
+      },
+      "native": {
+        "samples": 979912.0,
+        "active": 621732.0,
+        "offset_ge15": 33794.0,
+        "offset_ge20": 9056.0,
+        "offset_ge25": 1400.0,
+        "cap_violation": 0.0,
+        "cap_active": 463.0,
+        "recovery_failed": 1.0,
+        "base_clipped": 138091.0,
+        "ample_gate_nonzero": 539263.0,
+        "ample_base_nonzero": 420989.0,
+        "restricted_gate_active": 522718.0,
+        "release_samples": 0.0,
+        "release_offset_sum": 0.0,
+        "release_base_sum": 0.0,
+        "failed": 5.0,
+        "episode_assignments_including_initial": 1632.0,
+        "offset_ge15_per_active_sample": 0.054354609381534164,
+        "offset_ge20_per_active_sample": 0.014565761453487999,
+        "offset_ge25_per_active_sample": 0.0022517740762901055,
+        "ample_gate_nonzero_per_active_sample": 0.8673560312160223,
+        "ample_base_nonzero_per_active_sample": 0.6771229404309252
+      }
+    },
+    "iteration_time_seconds_excluding_first_five": {
+      "count": 45,
+      "median": 6.24,
+      "min": 5.6,
+      "max": 9.17
+    },
+    "command": [
+      "/home/oyoungquist/.conda/envs/lr_lab_cupiqp/bin/python",
+      "legged_gym/scripts/train_pilot_continuation.py",
+      "--production-interactions",
+      "--smoke-full-mixture",
+      "--run",
+      "analysis/pilot_candidate/rerun_20261125_194754/training",
+      "--checkpoint",
+      "24201",
+      "--num-envs",
+      "4096",
+      "--iterations",
+      "50",
+      "--gpu",
+      "cuda:1",
+      "--output-dir",
+      "analysis/pilot_interactions_smoke_verified"
+    ],
+    "timing_excludes_simulator_startup": true
+  },
+  "followup_resume": {
+    "directory": "analysis/pilot_interactions_resume_verified",
+    "command": [
+      "/home/oyoungquist/.conda/envs/lr_lab_cupiqp/bin/python",
+      "legged_gym/scripts/train_pilot_continuation.py",
+      "--production-interactions",
+      "--smoke-full-mixture",
+      "--run",
+      "analysis/pilot_interactions_smoke_verified",
+      "--checkpoint",
+      "24251",
+      "--num-envs",
+      "4096",
+      "--iterations",
+      "1",
+      "--gpu",
+      "cuda:1",
+      "--output-dir",
+      "analysis/pilot_interactions_resume_verified"
+    ],
+    "completed_updates": 1,
+    "final_iteration": 24252,
+    "optimizer_restored": true,
+    "nonfinite_checked_actor_critic_gradient_elements": 0.0,
+    "changes_since_50_update_smoke": [
+      "Current-interval mask for distribution recorder",
+      "Restore new configuration section from old archived class",
+      "Refresh source hashes in explicit continuation migration"
+    ],
+    "reference_dynamics_changed_after_50_update_smoke": false
+  },
+  "evaluation": {
+    "directory": "analysis/pilot_interactions_evaluation",
+    "command": [
+      "/home/oyoungquist/.conda/envs/lr_lab_cupiqp/bin/python",
+      "legged_gym/scripts/eval_b1z1_pilot_compliance.py",
+      "--run",
+      "analysis/pilot_interactions_resume_verified",
+      "--checkpoint",
+      "24252",
+      "--gpu",
+      "cuda:1",
+      "--headless",
+      "--num-envs",
+      "24",
+      "--seeds",
+      "0",
+      "--episodes-per-condition",
+      "2",
+      "--calibration-episodes",
+      "2",
+      "--conditions",
+      "nominal",
+      "up_yield_up_force",
+      "up_yield_down_force",
+      "down_yield_up_force",
+      "down_yield_down_force",
+      "ample_base_on",
+      "ample_base_off",
+      "restricted_base_on",
+      "restricted_base_off",
+      "calibration_protected_50n",
+      "--output-dir",
+      "analysis/pilot_interactions_evaluation"
+    ],
+    "checkpoint": "/home/oyoungquist/Research/Genesis_Development/HCR_legged_manip/analysis/pilot_interactions_resume_verified/model_24252.pt",
+    "checkpoint_sha256": "9de12e96e6e17928c17af4665faac5e703bdaf3cfecb0da155f36c9a6467a9fc",
+    "evaluation_seeds": [
+      0
+    ],
+    "completed_trials": 24,
+    "failures": 5,
+    "per_condition": {
+      "ample_base_off": {
+        "trials": 2,
+        "failures": 1,
+        "setup_tracking_failed": 0,
+        "ee_tracking_error_m": {
+          "mean": 0.030894070863723755,
+          "trials": 2
+        },
+        "reference_signed_displacement_m": {
+          "mean": 0.05136813595890999,
+          "trials": 1
+        },
+        "signed_displacement_m": {
+          "mean": 0.04998103529214859,
+          "trials": 1
+        },
+        "recovery_error_m": {
+          "mean": 0.009007814340293407,
+          "trials": 1
+        },
+        "base_guidance_velocity_m_s": {
+          "mean": 0.002096073469147086,
+          "trials": 1
+        }
+      },
+      "ample_base_on": {
+        "trials": 2,
+        "failures": 0,
+        "setup_tracking_failed": 0,
+        "ee_tracking_error_m": {
+          "mean": 0.028678289614617825,
+          "trials": 2
+        },
+        "reference_signed_displacement_m": {
+          "mean": 0.05128905177116394,
+          "trials": 2
+        },
+        "signed_displacement_m": {
+          "mean": 0.05145907960832119,
+          "trials": 2
+        },
+        "recovery_error_m": {
+          "mean": 0.006973854266107082,
+          "trials": 2
+        },
+        "base_guidance_velocity_m_s": {
+          "mean": 0.04208905063569546,
+          "trials": 2
+        }
+      },
+      "calibration_protected_50n": {
+        "trials": 2,
+        "failures": 0,
+        "setup_tracking_failed": 0,
+        "ee_tracking_error_m": {
+          "mean": 0.05106121115386486,
+          "trials": 2
+        },
+        "reference_signed_displacement_m": {
+          "mean": 0.0,
+          "trials": 2
+        },
+        "signed_displacement_m": {
+          "mean": 0.1047000139951706,
+          "trials": 2
+        },
+        "recovery_error_m": {
+          "mean": 0.006704607512801886,
+          "trials": 2
+        },
+        "base_guidance_velocity_m_s": {
+          "mean": -0.03964395448565483,
+          "trials": 2
+        }
+      },
+      "calibration_up_30n": {
+        "trials": 2,
+        "failures": 0,
+        "setup_tracking_failed": 0,
+        "ee_tracking_error_m": {
+          "mean": 0.03655989654362202,
+          "trials": 2
+        },
+        "reference_signed_displacement_m": {
+          "mean": 0.14996574819087982,
+          "trials": 2
+        },
+        "signed_displacement_m": {
+          "mean": 0.13668916374444962,
+          "trials": 2
+        },
+        "recovery_error_m": {
+          "mean": 0.006658411584794521,
+          "trials": 2
+        },
+        "base_guidance_velocity_m_s": {
+          "mean": -0.05533892847597599,
+          "trials": 2
+        }
+      },
+      "calibration_up_50n": {
+        "trials": 2,
+        "failures": 0,
+        "setup_tracking_failed": 0,
+        "ee_tracking_error_m": {
+          "mean": 0.04517144337296486,
+          "trials": 2
+        },
+        "reference_signed_displacement_m": {
+          "mean": 0.24994295835494995,
+          "trials": 2
+        },
+        "signed_displacement_m": {
+          "mean": 0.21775490045547485,
+          "trials": 2
+        },
+        "recovery_error_m": {
+          "mean": 0.005933600477874279,
+          "trials": 2
+        },
+        "base_guidance_velocity_m_s": {
+          "mean": -0.045269109308719635,
+          "trials": 2
+        }
+      },
+      "down_yield_down_force": {
+        "trials": 2,
+        "failures": 0,
+        "setup_tracking_failed": 0,
+        "ee_tracking_error_m": {
+          "mean": 0.038747478276491165,
+          "trials": 2
+        },
+        "reference_signed_displacement_m": {
+          "mean": -0.05128899775445461,
+          "trials": 2
+        },
+        "signed_displacement_m": {
+          "mean": -0.07212907075881958,
+          "trials": 2
+        },
+        "recovery_error_m": {
+          "mean": 0.007830515736714005,
+          "trials": 2
+        },
+        "base_guidance_velocity_m_s": {
+          "mean": -0.02483198419213295,
+          "trials": 2
+        }
+      },
+      "down_yield_up_force": {
+        "trials": 2,
+        "failures": 0,
+        "setup_tracking_failed": 0,
+        "ee_tracking_error_m": {
+          "mean": 0.035205284133553505,
+          "trials": 2
+        },
+        "reference_signed_displacement_m": {
+          "mean": 0.0,
+          "trials": 2
+        },
+        "signed_displacement_m": {
+          "mean": 0.053897980600595474,
+          "trials": 2
+        },
+        "recovery_error_m": {
+          "mean": 0.009393158834427595,
+          "trials": 2
+        },
+        "base_guidance_velocity_m_s": {
+          "mean": -0.06535816565155983,
+          "trials": 2
+        }
+      },
+      "nominal": {
+        "trials": 2,
+        "failures": 0,
+        "setup_tracking_failed": 0,
+        "ee_tracking_error_m": {
+          "mean": 0.02719615213572979,
+          "trials": 2
+        },
+        "reference_signed_displacement_m": {
+          "mean": 0.0,
+          "trials": 2
+        },
+        "signed_displacement_m": {
+          "mean": -0.0023082352709025145,
+          "trials": 2
+        },
+        "recovery_error_m": {
+          "mean": 0.005299719283357263,
+          "trials": 2
+        },
+        "base_guidance_velocity_m_s": {
+          "mean": -0.031232607550919056,
+          "trials": 2
+        }
+      },
+      "restricted_base_off": {
+        "trials": 2,
+        "failures": 2,
+        "setup_tracking_failed": 2,
+        "ee_tracking_error_m": {
+          "mean": 0.05359681509435177,
+          "trials": 2
+        },
+        "reference_signed_displacement_m": {
+          "mean": null,
+          "trials": 0
+        },
+        "signed_displacement_m": {
+          "mean": null,
+          "trials": 0
+        },
+        "recovery_error_m": {
+          "mean": null,
+          "trials": 0
+        },
+        "base_guidance_velocity_m_s": {
+          "mean": null,
+          "trials": 0
+        }
+      },
+      "restricted_base_on": {
+        "trials": 2,
+        "failures": 2,
+        "setup_tracking_failed": 2,
+        "ee_tracking_error_m": {
+          "mean": 0.055567653849720955,
+          "trials": 2
+        },
+        "reference_signed_displacement_m": {
+          "mean": null,
+          "trials": 0
+        },
+        "signed_displacement_m": {
+          "mean": null,
+          "trials": 0
+        },
+        "recovery_error_m": {
+          "mean": null,
+          "trials": 0
+        },
+        "base_guidance_velocity_m_s": {
+          "mean": null,
+          "trials": 0
+        }
+      },
+      "up_yield_down_force": {
+        "trials": 2,
+        "failures": 0,
+        "setup_tracking_failed": 0,
+        "ee_tracking_error_m": {
+          "mean": 0.047241074964404106,
+          "trials": 2
+        },
+        "reference_signed_displacement_m": {
+          "mean": 0.0,
+          "trials": 2
+        },
+        "signed_displacement_m": {
+          "mean": -0.055544255301356316,
+          "trials": 2
+        },
+        "recovery_error_m": {
+          "mean": 0.005148471565917134,
+          "trials": 2
+        },
+        "base_guidance_velocity_m_s": {
+          "mean": -0.027815724723041058,
+          "trials": 2
+        }
+      },
+      "up_yield_up_force": {
+        "trials": 2,
+        "failures": 0,
+        "setup_tracking_failed": 0,
+        "ee_tracking_error_m": {
+          "mean": 0.02867905981838703,
+          "trials": 2
+        },
+        "reference_signed_displacement_m": {
+          "mean": 0.05128899775445461,
+          "trials": 2
+        },
+        "signed_displacement_m": {
+          "mean": 0.07768730446696281,
+          "trials": 2
+        },
+        "recovery_error_m": {
+          "mean": 0.005091949366033077,
+          "trials": 2
+        },
+        "base_guidance_velocity_m_s": {
+          "mean": -0.05754091218113899,
+          "trials": 2
+        }
+      }
+    },
+    "valid_reference_samples": 16131,
+    "max_valid_offset_m": 0.24999946355819702,
+    "valid_offset_cap_exceedances": 0,
+    "constraint_invalid_events": 0,
+    "frozen_policy": true,
+    "production_source_hash_match": true,
+    "reference_advances_verified": true,
+    "applied_force_alignment_verified": true,
+    "elapsed_seconds": 66.24037429201417,
+    "control_dt": 0.02
+  },
+  "source_hashes": {
+    "legged_gym/envs/b1z1/pilot_interactions.py": "891e39dcdcb4802d150bf1b11ad6881be21e5e6265f4a5afe2f3d3f605e4fbc6",
+    "legged_gym/envs/b1z1/pilot_continuation.py": "ed5c6d705e011b19dc5f694568778a9484c9e201875a491f05fdb38f08d10989",
+    "legged_gym/envs/b1z1/b1z1_pact/b1z1_pact.py": "3078440df8d12b5db194bde1b9bc60750bc44a8a955cb506382dcd4d6febbbed",
+    "legged_gym/envs/b1z1/compliance_task.py": "72dacabc305769d577109c864d9140069814a4ddf63ca90a72e8c63f227f4ab7",
+    "legged_gym/envs/b1z1/directional_compliance.py": "741a191268551e20d005cf7da3f1a770bfe02bf65ba3902e878e3f9f57589e8b",
+    "legged_gym/envs/b1z1/compliance_bounds.py": "6471954314bddd8ee6e7b49374cbd59399f89b8ee830e42190dd05d834b7266f",
+    "legged_gym/simulator/isaaclab_simulator_b1z1.py": "2b8f3c77ee3714748e519ea7096f29b99a1ff9eb319bdd854e4a7ca983da8129"
+  },
+  "limitations": [
+    "Implementation smoke, not convergence or a method comparison; one trained checkpoint and one evaluation seed.",
+    "Ample controls are not perfectly base-stationary: report actual gate/base-reference exposure.",
+    "All four restricted evaluation trials failed with roll termination before useful loaded measurements; retain unavailable metrics and failed trials.",
+    "Protected references do not imply zero measured deflection; 50 N protected trials displaced approximately 0.105 m.",
+    "50-update histogram exports predate corrected current-interval validity masking; do not use them as authoritative pre-failure quantiles. Family sufficient-statistic counters and cap checks are independent of that mask.",
+    "The failed first continuation attempt is preserved in /tmp/pilot_interactions_smoke_reporting_fix.log; archived-section restoration was then fixed and verified.",
+    "Simulator emitted file-watcher errno=28 warnings; filesystem had 929 GiB free. No system settings or running external jobs were changed.",
+    "No full training, Unity submission, or GPU smoke for every inherited ablation was performed."
+  ]
+}

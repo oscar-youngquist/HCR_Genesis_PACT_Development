@@ -228,6 +228,8 @@ def main(argv=None):
     archive_path=path.parent/'b1z1_pact_config.py'
     spec=importlib.util.spec_from_file_location('rss_archive',archive_path);archive=importlib.util.module_from_spec(spec);spec.loader.exec_module(archive)
     cfg=shared.materialize(archive.B1Z1PACTCfg());training=shared.materialize(archive.B1Z1PACTCfgPPO())
+    from legged_gym.envs.b1z1.pilot_interactions import prepare_restore
+    prepare_restore(cfg,contract['environment'])
     restore_sections(cfg,contract['environment']);restore_sections(training,contract['training'])
     cfg._compliance_layout_added=True  # Saved dimensions already include the 12 coefficients.
     if cfg.env.num_observations!=93 or cfg.env.num_policy_actions!=34 or training.runner_class_name!='B1Z1PACTRunner' or not cfg.compliance.enabled:
@@ -236,6 +238,14 @@ def main(argv=None):
     saved_revision=state['training_state'].get('source_revision')
     critical=['legged_gym/envs/b1z1/b1z1_pact/b1z1_pact.py','legged_gym/envs/b1z1/compliance_task.py',
         'rsl_rl/modules/actor_critic_b1z1_pact.py']
+    production=contract['environment'].get('pilot_interactions',{})
+    source_hashes=production.get('source_hashes') or {}
+    import hashlib
+    production_source_ok=(production.get('enabled',False) and production.get('version')==1 and
+        all(f in source_hashes for f in critical[:2]) and
+        'legged_gym/envs/b1z1/directional_compliance.py' in source_hashes and
+        all(hashlib.sha256((ROOT/f).read_bytes()).hexdigest()==h for f,h in source_hashes.items()) and
+        subprocess.check_output(['git','show',f'{saved_revision}:{critical[2]}'],cwd=ROOT)==(ROOT/critical[2]).read_bytes())
     source_diff=subprocess.check_output(['git','diff',saved_revision,'--',*critical],cwd=ROOT)
     # Candidate runs explicitly retain the existing local reward-threshold edit;
     # it affects rewards only, not inference. No general source-audit bypass.
@@ -244,12 +254,14 @@ def main(argv=None):
     candidate_source_ok=args.candidate and saved_revision and all(
         audited_source(subprocess.check_output(['git','show',f'{saved_revision}:{f}'],cwd=ROOT,text=True))==
         audited_source((ROOT/f).read_text()) for f in critical)
-    if not saved_revision or (source_diff and not candidate_source_ok):
+    if not saved_revision or (source_diff and not candidate_source_ok and not production_source_ok):
         raise ValueError('Policy/observation/compliance source differs from the saved revision; explicit semantic audit required')
     reference_path='legged_gym/envs/b1z1/directional_compliance.py'
     original=subprocess.check_output(['git','show',f'{saved_revision}:{reference_path}'],cwd=ROOT,text=True)
-    if diagnostic_free_ast(original)!=diagnostic_free_ast((ROOT/reference_path).read_text()):
+    if not production_source_ok and diagnostic_free_ast(original)!=diagnostic_free_ast((ROOT/reference_path).read_text()):
         raise ValueError('Reference dynamics changed beyond the audited opt-in diagnostics')
+    if production.get('enabled',False):
+        cfg.pilot_interactions.sample_scenarios=False
     c=copy.deepcopy(EVAL_CONFIG)
     if args.config:
         override=json.loads(args.config.read_text())
@@ -315,7 +327,9 @@ def main(argv=None):
         evaluation_config=c,pose_witnesses=pose_report,training_seed=contract['training'].get('seed'),
         evaluation_seeds=args.seeds,conditions=args.conditions,episodes_per_condition=args.episodes_per_condition,
         calibration_conditions=calibration_conditions,calibration_episodes=args.calibration_episodes,
-        reference_diagnostics=c['reference_diagnostics'],reference_ast_parity=True,
+        reference_diagnostics=c['reference_diagnostics'],
+        reference_ast_parity=diagnostic_free_ast(original)==diagnostic_free_ast((ROOT/reference_path).read_text()),
+        production_source_hash_match=bool(production_source_ok),
         policy_hash_before=before,strict_weights_load=True,semantic_source_match=not bool(source_diff),
         candidate_settings=args.candidate,candidate_source_audit=bool(candidate_source_ok),
         frames=dict(ee_task='base-heading-relative xy, world absolute z; m',ee_velocity_task='mixed-coordinate derivative including base/yaw transport; m/s',

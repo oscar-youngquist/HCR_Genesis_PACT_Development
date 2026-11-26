@@ -144,6 +144,7 @@ def test_wrench_logging_replay_and_reset_do_not_advance_targets():
     task.reference=model;task.coverage=DisturbanceCoverage(None,2,'cpu')
     task.wrench_sum=torch.stack((result.torso_wrench,result.ee_wrench,result.combined_wrench),1)*3
     task.wrench_count=torch.ones(2)*3;task.target=None
+    task.cap_counts=torch.zeros(2,2)
     task.interval={'command':result.base.clone()}
     stats=task.wrench_statistics(torch.arange(2))
     assert stats['compliance_wrench/torso/fx_N']==4

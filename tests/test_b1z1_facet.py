@@ -33,7 +33,8 @@ def test_config_allowlist_and_resolved_layout():
                   for name in set(getattr(facet.control, kind)) | set(getattr(baseline.control, kind))}
     bounded_changes = {'facet_forces', 'env.num_steps_per_env', 'commands.zero_vel_cmd_prob_after_force',
                        'commands.apply_base_external_torques', 'domain_rand.push_robots'}
-    assert differences(class_to_dict(facet), class_to_dict(baseline)) == {"compliance.enabled", "facet_reference", "facet_tracking", "facet_observations"} | gain_paths | bounded_changes
+    # PACT interaction curriculum is explicitly excluded from FACET.
+    assert differences(class_to_dict(facet), class_to_dict(baseline)) == {"compliance.enabled", "pilot_interactions.enabled", "facet_reference", "facet_tracking", "facet_observations"} | gain_paths | bounded_changes
     train, base_train = B1Z1FACETCfgPPO(), copy_sections(B1Z1PPOPosCfgPPO)
     from legged_gym.envs.b1z1.b1z1_pact.b1z1_pact_config import B1Z1PACTCfgPPO
     from legged_gym.envs.b1z1.b1z1_facet.b1z1_facet_config import COMMON_PPO
@@ -56,7 +57,7 @@ def test_config_allowlist_and_resolved_layout():
     # rigid-tracking reward suppression. Stage 3 registration is tested separately;
     # raw nominal coefficients remain available for diagnostic-only bookkeeping.
     assert differences(class_to_dict(facet), class_to_dict(baseline)) == {
-        "compliance.enabled", "facet_reference", "facet_tracking", "facet_observations", "env.num_observations", "env.num_critic_state_obs",
+        "compliance.enabled", "pilot_interactions.enabled", "facet_reference", "facet_tracking", "facet_observations", "env.num_observations", "env.num_critic_state_obs",
         "env.num_privileged_obs", "env.num_privileged_recon_obs",
         "rewards.scales.arm_progress_before_torso", "rewards.scales.ref_dof_leg",
         "rewards.scales.early_torso_tilt", "rewards.scales.feet_contact_number",

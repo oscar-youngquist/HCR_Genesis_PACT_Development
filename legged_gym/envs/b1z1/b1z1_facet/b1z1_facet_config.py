@@ -20,6 +20,7 @@ class B1Z1FACETCfg:
         # Nominal references only. Disabling compliance also avoids its derived
         # +12 profile observation entries; keep native Pos history/controller slots.
         self.compliance.enabled = False
+        self.pilot_interactions.enabled = False  # FACET keeps its own reference/force formulation.
         self.use_force_shifted_target = False
         self.action_mode = "position"  # 17 learned positions, no learned FF head.
         self.facet_reference = FACETReferenceCfg()

@@ -40,7 +40,12 @@ def resize_progress(state,old_count,new_count):
     return result,indices
 
 
-def allowed_change(change,old_count,new_count):
+def allowed_change(change,old_count,new_count,production=False):
+    if production:
+        if change['path']=='.environment.compliance.max_offset_norm':
+            return change['old'] in (None,.3) and change['new']==.3
+        if change['path'].startswith('.environment.pilot_interactions'):
+            return True  # Explicit opt-in, versioned settings printed in migration report.
     if any(change['path'].startswith(p) for p in (
             '.environment.pilot_candidate','.environment.compliance.base_gain','.environment.env.num_envs')):
         return True
@@ -53,11 +58,15 @@ def allowed_change(change,old_count,new_count):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--run',type=Path,default=ROOT/'logs/b1z1/b1z1_pact_lab/Nov19_04-02-42_b1z1_pact_improved')
-    p.add_argument('--checkpoint');p.add_argument('--iterations',type=int,default=1000)
+    p.add_argument('--checkpoint');p.add_argument('--iterations',type=int)
     p.add_argument('--num-envs',type=int,default=4096)
     p.add_argument('--gpu',default='cuda:1');p.add_argument('--output-dir',type=Path,required=True)
     p.add_argument('--candidate-config',type=Path);p.add_argument('--preflight-only',action='store_true')
+    p.add_argument('--production-interactions',action='store_true',help='Use normal PACT path, not the old experimental wrapper')
+    p.add_argument('--smoke-full-mixture',action='store_true',help='Test-only immediate final mixture')
     args=p.parse_args()
+    if args.iterations is None:args.iterations=50 if args.production_interactions else 1000
+    if args.smoke_full_mixture and not args.production_interactions:p.error('Full-mixture smoke requires --production-interactions')
     if args.iterations<1: p.error('iterations must be positive')
     if args.output_dir.exists(): raise FileExistsError(args.output_dir)
     args.output_dir.mkdir(parents=True)
@@ -74,13 +83,28 @@ def main():
     spec=importlib.util.spec_from_file_location('candidate_archive',path.parent/'b1z1_pact_config.py')
     archive=importlib.util.module_from_spec(spec);spec.loader.exec_module(archive)
     cfg=shared.materialize(archive.B1Z1PACTCfg());train=shared.materialize(archive.B1Z1PACTCfgPPO())
+    from legged_gym.envs.b1z1.pilot_interactions import prepare_restore
+    prepare_restore(cfg,saved['environment'])
     restore_sections(cfg,saved['environment']);restore_sections(train,saved['training'])
     cfg._compliance_layout_added=True
     old_count=cfg.env.num_envs
     if not 0<args.num_envs<=old_count:p.error('num-envs must be positive and <= saved count')
     cfg.env.num_envs=args.num_envs
-    candidate=Candidate(**(json.loads(args.candidate_config.read_text()) if args.candidate_config else {}))
-    configure(cfg,candidate)
+    if args.production_interactions:
+        from legged_gym.envs.b1z1.pilot_interactions import InteractionCfg,configure as production_configure
+        if not saved['environment'].get('pilot_interactions',{}).get('enabled',False):
+            cfg.pilot_interactions=InteractionCfg()
+            cfg.pilot_interactions.mixture_start_iteration=state['iteration']
+        cfg.pilot_interactions.smoke_full_mixture=args.smoke_full_mixture
+        cfg.pilot_interactions.diagnostics=True
+        # This explicit migration records the currently executed source, not
+        # stale hashes restored from its input checkpoint. Changes stay audited.
+        cfg.pilot_interactions.source_hashes=None
+        production_configure(cfg)
+    else:
+        candidate=Candidate(**(json.loads(args.candidate_config.read_text()) if args.candidate_config else {}))
+        configure(cfg,candidate)
+        if hasattr(cfg,'pilot_interactions'):cfg.pilot_interactions.enabled=False
     train.runner.max_iterations=args.iterations;train.runner.save_interval=100
     train.runner.resume=False;train.runner.run_name='pilot_candidate_continuation'
     train.runner.experiment_name='pilot_candidate_continuation'
@@ -107,7 +131,8 @@ def main():
         from rsl_rl.runners.b1z1_pact_runner import B1Z1PACTRunner
         from legged_gym.utils.pilot_candidate_diagnostics import Distributions
         set_seed(train.seed)
-        env=environment_class(B1Z1PACT,training=True)(cfg,class_to_dict(cfg.sim),args.gpu,True)
+        cls=B1Z1PACT if args.production_interactions else environment_class(B1Z1PACT,training=True)
+        env=cls(cfg,class_to_dict(cfg.sim),args.gpu,True)
         recorder=Distributions(args.output_dir,env.dt)
         class Runner(B1Z1PACTRunner):
             def _log(self,iteration,*rest,**kwargs):
@@ -122,7 +147,7 @@ def main():
         runner=Runner(env,config,str(args.output_dir),args.gpu)
         actual=copy.deepcopy(runner._training_contract)
         changes=differences(saved,actual)
-        unexplained=[d for d in changes if not allowed_change(d,old_count,args.num_envs)]
+        unexplained=[d for d in changes if not allowed_change(d,old_count,args.num_envs,args.production_interactions)]
         report['contract_changes']=changes
         if unexplained:
             raise ValueError('Unapproved continuation contract differences: '+json.dumps(unexplained))
@@ -141,6 +166,19 @@ def main():
             bridge=Path(temporary)/'resume.pt';torch.save(migrated,bridge)
             runner.load(str(bridge),load_optimizer=True)
         runner._resume_fresh_episodes()
+        if args.production_interactions:
+            # Initialization/reset warmups are not training interactions.
+            env.interactions.stats.zero_();env.interactions.counts.zero_()
+            env.interactions.counts.scatter_add_(0,env.interactions.family,
+                torch.ones(env.num_envs,device=env.device))
+            env.interactions.max_offset.zero_()
+        gradient_bad=torch.zeros((),device=args.gpu)
+        if args.production_interactions:
+            def check_gradient(g):
+                gradient_bad.add_((~torch.isfinite(g)).sum())
+                return g
+            for parameter in runner.alg.actor_critic.parameters():
+                if parameter.requires_grad:parameter.register_hook(check_gradient)
         # Exclude constructor/reset warmup intervals from training distributions.
         env.candidate_recorder=recorder
         report.update(status='training',optimizer_restored=True,
@@ -154,6 +192,9 @@ def main():
             writer=csv.DictWriter(f,fieldnames=fields);writer.writeheader();writer.writerows(scalar_rows)
         report.update(status='complete',completed_updates=args.iterations,
             final_iteration=runner.current_learning_iteration)
+        if args.production_interactions:
+            report['interaction_smoke']=env.interactions.summary()
+            report['nonfinite_gradient_elements']=gradient_bad.item()
         dump(args.output_dir/'resume_report.json',report)
         (args.output_dir/'COMPLETE').write_text('Requested continuation completed.\n')
     except BaseException:

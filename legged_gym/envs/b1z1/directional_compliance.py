@@ -13,6 +13,7 @@ from .compliance_bounds import bound_reference, feasible
 
 class ComplianceCfg:
     enabled = False
+    max_offset_norm = None  # m; opt-in, legacy methods remain uncapped.
     # Coefficient order: [-x,+x,-y,+y,-z,+z] and [-x,+x,-y,+y,-yaw,+yaw].
     ee_profile_low = [0.] * 6
     ee_profile_high = [1.] * 6
@@ -68,6 +69,9 @@ class ComplianceCfg:
 
 
 def validate(cfg):
+    cap = getattr(cfg, 'max_offset_norm', None)
+    if cap is not None and (not math.isfinite(cap) or cap <= 0):
+        raise ValueError('max_offset_norm must be None or finite and positive')
     for part in ("ee", "base"):
         lo, hi = [torch.as_tensor(getattr(cfg, part+"_profile_"+end)) for end in ("low", "high")]
         if lo.shape != (6,) or hi.shape != (6,) or not ((0 <= lo) & (lo <= hi) & (hi <= 1)).all():
@@ -252,6 +256,8 @@ class ComplianceReference:
         self.accepted=torch.zeros_like(self.delta)
         self.initialized=torch.zeros(n,device=device,dtype=torch.bool)
         self.recovering=torch.zeros_like(self.initialized)
+        self.cap_active=torch.zeros_like(self.initialized)
+        self.constraint_invalid=torch.zeros_like(self.initialized)
         self.profile=torch.zeros(n,12,device=device,dtype=dtype)
         from .compliance_sampling import ProfileSampler
         self.sampler=ProfileSampler(cfg,device,dtype)
@@ -266,6 +272,7 @@ class ComplianceReference:
         self.delta[ids]=0; self.rate[ids]=0; self.eta[ids]=0
         self.accepted[ids]=0; self.initialized[ids]=False
         self.recovering[ids]=False
+        self.cap_active[ids]=False; self.constraint_invalid[ids]=False
         self.profile[ids],self.family_ids[ids]=self.sampler.sample(len(ids))
 
     @torch.no_grad()
@@ -273,8 +280,13 @@ class ComplianceReference:
                 q,limits,jacobian,collision_clearance,dt,target_safe=None,measured_position=None,torso_wrench=None,
                 collision_path_gate=None, recovery_anchor=None, collision_start=None):
         c=self.cfg
+        cap=getattr(c,'max_offset_norm',None)
+        from .compliance_bounds import offset_prefix
+        self.cap_active.zero_(); self.constraint_invalid.zero_()
         previous=torch.where(self.initialized[:,None],self.accepted,nominal)
         recovering=~feasible(previous,center,bounds)
+        if cap is not None:
+            recovering |= (previous-nominal).norm(dim=-1)>cap+1e-6
         # A terrain/workspace change is a reference reinitialization, not a
         # zero-length first-exit step. Preserve only enabled Cartesian offsets.
         recovered=previous
@@ -283,7 +295,11 @@ class ComplianceReference:
             if not (feasible(anchor,center,bounds)|~recovering).all():
                 raise RuntimeError('No feasible compliance recovery anchor in current workspace')
             enabled=self.profile[:,:6].reshape(-1,3,2).amax(-1)>0
-            recovered,_=self.bound_reference(anchor+self.delta*enabled,torch.zeros_like(previous),center,bounds,start=anchor)
+            recovery_request=anchor+self.delta*enabled
+            if cap is not None:
+                recovery_request,hit=offset_prefix(anchor,recovery_request,nominal,cap)
+                self.cap_active |= hit & recovering
+            recovered,_=self.bound_reference(recovery_request,torch.zeros_like(previous),center,bounds,start=anchor)
             if target_safe is not None:recovered=target_safe(recovered,anchor)
             previous=torch.where(recovering[:,None],recovered,previous)
             self.delta.copy_(torch.where(recovering[:,None],previous-nominal,self.delta))
@@ -322,7 +338,12 @@ class ComplianceReference:
             contributions.append(torch.maximum(gate[:,:3],gate[:,3:]) if on else torch.zeros_like(force))
         gates=1-(1-stiffness)*(1-contributions[0])*(1-contributions[1])*(1-contributions[2])
         gates=gates*active
-        equilibrium,_=self.bound_reference(nominal+demand,torch.zeros_like(demand),center,bounds,start=nominal)
+        request=nominal+demand
+        if cap is not None:
+            request,hit=offset_prefix(nominal,request,nominal,cap)
+            self.cap_active |= hit
+        equilibrium,_=self.bound_reference(request,torch.zeros_like(demand),center,bounds,
+            start=(torch.where(feasible(nominal,center,bounds)[:,None],nominal,previous) if cap is not None else nominal))
         if self.collect_diagnostics:
             self.diagnostics={key:value.detach().clone() for key,value in dict(
                 force_task=force,selected_coefficients=gain,
@@ -330,7 +351,15 @@ class ComplianceReference:
                 raw_displacement=demand,equilibrium_workspace=equilibrium,
                 nominal_position=nominal,nominal_velocity=nominal_velocity,
                 directional_progress=progress).items()}
+            if cap is not None:
+                self.diagnostics['equilibrium_capped']=request.detach().clone()
         if target_safe is not None:
+            if cap is not None:
+                # The workspace is nonconvex (inner-radius exclusion). Establish
+                # its safe prefix from the same start used by geometry limiting;
+                # a later collision reduction must remain on that prefix.
+                equilibrium,_=self.bound_reference(equilibrium,torch.zeros_like(equilibrium),
+                    center,bounds,start=previous)
             equilibrium=target_safe(equilibrium,previous)
         if self.collect_diagnostics:
             self.diagnostics['equilibrium_geometry']=equilibrium.detach().clone()
@@ -348,7 +377,11 @@ class ComplianceReference:
         if self.collect_diagnostics:
             self.diagnostics['filtered_candidate']=(nominal+delta).detach().clone()
             self.diagnostics['filtered_velocity']=(nominal_velocity+rate).detach().clone()
-        position,velocity=self.bound_reference(nominal+delta,nominal_velocity+rate,center,bounds,start=previous)
+        candidate=nominal+delta
+        if cap is not None:
+            candidate,hit=offset_prefix(previous,candidate,nominal,cap)
+            self.cap_active |= hit
+        position,velocity=self.bound_reference(candidate,nominal_velocity+rate,center,bounds,start=previous)
         if target_safe is not None:
             safe=target_safe(position,previous)
             blocked=(safe-position).norm(dim=-1)>1e-7
@@ -359,6 +392,19 @@ class ComplianceReference:
         position=torch.where(recovering[:,None],recovered,position)
         recovery_velocity=torch.where(((recovered-nominal).norm(dim=-1)<1e-7)[:,None],nominal_velocity,torch.zeros_like(velocity))
         velocity=torch.where(recovering[:,None],recovery_velocity,velocity)
+        if cap is not None:
+            offset=position-nominal
+            outward=((offset*(velocity-nominal_velocity)).sum(-1)>0)&(offset.norm(dim=-1)>=cap-2e-6)
+            # Remove outward filter momentum, retaining inward recovery. Recheck
+            # workspace velocity; conflicting moving-nominal constraints fail explicitly.
+            velocity=torch.where(outward[:,None],nominal_velocity,velocity)
+            _,velocity=self.bound_reference(position,velocity,center,bounds,start=position)
+            self.constraint_invalid.copy_(~feasible(position,center,bounds) |
+                (offset.norm(dim=-1)>cap+2e-6) |
+                (((offset*(velocity-nominal_velocity)).sum(-1)>1e-6)&(offset.norm(dim=-1)>=cap-2e-6)))
+            if self.collect_diagnostics:
+                self.diagnostics['offset_cap_active']=self.cap_active.detach().clone()
+                self.diagnostics['constraint_invalid']=self.constraint_invalid.detach().clone()
         if self.collect_diagnostics:
             self.diagnostics['accepted_position']=position.detach().clone()
             self.diagnostics['accepted_velocity']=velocity.detach().clone()

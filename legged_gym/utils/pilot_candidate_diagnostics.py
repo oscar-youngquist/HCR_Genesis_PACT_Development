@@ -31,6 +31,12 @@ class Distributions:
                 masks[f'{name}_{label}_yielding']=present&(coeff[:,axis]>0)
                 masks[f'{name}_{label}_protected']=present&(coeff[:,axis]==0)
         masks['strong_profile']=valid&(coeff.amax(-1)>=.8)
+        if 'scenario_family' in data:
+            # Actual sampled IDs, never inferred from a coefficient threshold.
+            for i,name in enumerate(('yielding','protected','ample','restricted','native')):
+                present=valid&(data['scenario_family']==i)
+                masks['scenario_'+name]=present
+                masks['scenario_'+name+'_loaded']=present&active.any(-1)
         if group_prefix:masks={group_prefix+'/'+k:v for k,v in masks.items()}
         # Bounded by one rollout, transferred once per field at the PPO boundary.
         self.pending.append(({k:data[k] for k in keys if k in data},masks))
