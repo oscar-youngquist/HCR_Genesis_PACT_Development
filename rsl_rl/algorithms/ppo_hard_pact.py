@@ -613,6 +613,8 @@ class PPO_HardPACT:
             velocity_tracking_replay_enabled=(self.lambda_qp_velocity_xy>0 or self.lambda_qp_velocity_yaw>0),
         )
         self.hard_pact_qp = None
+        from .hard_pact_recovery_budget import RecoveryLossBudget
+        self.recovery_loss_budget = RecoveryLossBudget(self.qp_config, self.device)
         self._qp_training_iteration = 0
         self.last_qp_metrics = {}
         self._qp_full_audit_inputs = None
@@ -1112,6 +1114,11 @@ class PPO_HardPACT:
         self._actor_regularizer_sums = {}
         self.last_actor_regularizer_metrics = {}
         self._actor_loss_sums = {}
+        self._recovery_diagnostics_due = (self.qp_config.tensorboard_diagnostics_enabled
+            and self.qp_config.tensorboard_diagnostics_interval > 0
+            and itr % self.qp_config.tensorboard_diagnostics_interval == 0)
+        if self.qp_config.recovery_loss_budget_enabled:
+            self.recovery_loss_budget.begin(itr)
         self._qp_training_iteration = int(itr)
         self.actor_physics_warmup_factor = self._actor_physics_weight_at_iteration(itr)
         valid_boot_statistics = ValidBootStatistics()
@@ -1266,6 +1273,7 @@ class PPO_HardPACT:
                     qp_target_count.add_(full * expected)
             pinn_loss = None
             self._actor_qp_velocity_loss = None
+            self._actor_recovery_loss = None
             self._actor_load_loss = None
             if qp_rows is not None:
                 # One QP graph shared by the three owned VJPs, using the exact
@@ -1303,6 +1311,14 @@ class PPO_HardPACT:
                     ppo_losses.append(actor_regularization)
                 else:
                     ppo_losses[1] = ppo_losses[1]+actor_regularization
+            if self.qp_config.recovery_loss_budget_enabled and len(ppo_losses) > 1:
+                recovery = (self._actor_recovery_loss if optimize_physics
+                            and self._actor_recovery_loss is not None else ppo_losses[1]*0.)
+                ppo_losses[1], budget_metrics = self.recovery_loss_budget.apply(
+                    ppo_losses[1], recovery, obs_batch.shape[0])
+                if self._recovery_diagnostics_due:
+                    for name, value in budget_metrics.items():
+                        self._record_actor_loss('recovery_budget/'+name, value, obs_batch.shape[0])
             # Cheap detached scalar accounting, independent of diagnostic cadence.
             # Totals reflect the actual weighted objective before PCGrad, not
             # gradient norms; each component retains its own valid denominator.
@@ -1684,6 +1700,8 @@ class PPO_HardPACT:
         # Periodic checkpoints must resume at the next uncollected iteration,
         # not restart a configured QP warmup from an old runner counter.
         self._last_completed_iteration = int(itr)
+        if self.qp_config.recovery_loss_budget_enabled:
+            self.recovery_loss_budget.finish()
         self.last_qp_metrics.update({
             "qp/minimal/warmup/qp_enabled": metric_zero.new_tensor(float(qp_iteration_ready)),
             "qp/minimal/warmup/remaining_iterations": metric_zero.new_tensor(
@@ -2990,6 +3008,13 @@ class PPO_HardPACT:
             recovery_loss, recovery_per_row = recovery_projection_loss(
                 qp_result, sampled_nominal, torque_limits, valid, self.hard_pact_qp.cfg,
             )
+            if getattr(self, '_recovery_diagnostics_due', False) and not compute_pinn:
+                with torch.no_grad():
+                    quadratic, _ = recovery_projection_loss(qp_result, sampled_nominal,
+                        torque_limits, valid, self.hard_pact_qp.cfg, quadratic=True)
+                self._record_actor_loss('recovery_budget/quadratic_weighted',
+                    quadratic*self.lambda_projection,
+                    (valid.reshape(-1) & qp_result.recovery_mask.reshape(-1)).sum())
             if self.hard_pact_features.post_qp == 'imitation':
                 # Full stance/slack values above remain diagnostic-only.
                 # Loss/* reports only the actual optimized torque-target terms.
@@ -3022,7 +3047,11 @@ class PPO_HardPACT:
                         if self.hard_pact_qp.cfg.torque_rate_constraint_weight>0:
                             self._record_actor_loss(owner+'/rate_slack_nm',
                                 qp_result.recovery_rate_slack[mask].abs().sum()/(count*12).clamp_min(1),count)
-            qp_loss = qp_loss + recovery_loss
+            if (self.qp_config.recovery_loss_budget_enabled and not compute_pinn
+                    and self.hard_pact_features.projection_loss):
+                self._actor_recovery_loss = self.lambda_projection * recovery_loss
+            else:
+                qp_loss = qp_loss + recovery_loss
             # stopgrad deliberately computes and reports exactly this metric,
             # but neither it nor any QP output participates in optimization.
             if not self.hard_pact_features.projection_loss:
@@ -3042,7 +3071,9 @@ class PPO_HardPACT:
             # Log only the newly recomputed sampled solve, whose status can
             # differ from rollout after policy/head parameters update.
             self.last_qp_metrics = dict(qp_result.metrics or {})
-            self.last_qp_metrics["qp/minimal/projection_loss"] = qp_loss.detach()
+            self.last_qp_metrics["qp/minimal/projection_loss"] = (
+                qp_loss + recovery_loss if self.qp_config.recovery_loss_budget_enabled
+                and not compute_pinn and self.hard_pact_features.projection_loss else qp_loss).detach()
             if self.actor_regularizers.lambda_load > 0 and not self.hard_pact_features.variant_id.startswith('rss_'):
                 cfg=self.actor_regularizers
                 accepted=qp_result.differentiated_mask | qp_result.recovery_mask

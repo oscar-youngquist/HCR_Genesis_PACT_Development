@@ -154,6 +154,12 @@ class HardPACTQPConfig:
     recovery_projection_weight: float = 1.0
     recovery_projection_slack_weight: float = 1.0
     recovery_projection_rate_slack_weight: float = 1.0
+    recovery_slack_huber_enabled: bool = False
+    recovery_slack_huber_delta: float = 1.0
+    recovery_loss_budget_enabled: bool = False
+    recovery_loss_budget_ratio: float = 0.5
+    recovery_loss_budget_ema_alpha: float = 0.01
+    recovery_loss_budget_reference_floor: float = 1e-6
     qp_update_mode: str = "random_one_substep"
     intervention_settling_iterations: int = 200
     intervention_ramp_iterations: int = 4000
@@ -319,6 +325,14 @@ class HardPACTQPConfig:
 
     def __post_init__(self):
         import math
+        for name in ('recovery_slack_huber_delta', 'recovery_loss_budget_ratio',
+                     'recovery_loss_budget_ema_alpha', 'recovery_loss_budget_reference_floor'):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0 or (name in
+                    ('recovery_slack_huber_delta','recovery_loss_budget_ema_alpha') and value == 0):
+                raise ValueError(name+' must be finite and nonnegative (delta/EMA alpha positive)')
+        if self.recovery_loss_budget_ema_alpha > 1:
+            raise ValueError('recovery_loss_budget_ema_alpha must be <= 1')
         if (not math.isfinite(self.intervention_gate_check_interval) or self.intervention_gate_check_interval<1
                 or int(self.intervention_gate_check_interval)!=self.intervention_gate_check_interval):
             raise ValueError('intervention_gate_check_interval must be a positive integer')
@@ -1643,19 +1657,28 @@ class HardPACTDifferentiableQP:
         return result
 
 
-def recovery_projection_loss(result, tau_nom, torque_limit, physics_valid, cfg):
+def recovery_projection_loss(result, tau_nom, torque_limit, physics_valid, cfg, *, quadratic=False):
     """Mean over valid softened solves; outer lambda_projection applies in PPO.
 
     L_rec = w_rec * mean(||(tau_soft-tau_nom)/tau_limit||²
                         + w_joint ||s_joint/[rad/s² scale]||²
                         + w_rate ||s_rate/[Nm scale]||²).
     Select rows before arithmetic; failed/analytic rows receive no supervision.
+    Optional twice-Huber replaces only the outer normalized slack squares;
+    ``quadratic=True`` retains their original value for detached diagnostics.
     The original hard-QP loss and its denominator are unchanged.
     """
     valid = physics_valid.reshape(-1).bool() & result.recovery_mask
     torque = ((result.tau_safe[valid]-tau_nom[valid])/torque_limit).square().sum(-1)
-    slack = (result.recovery_slack[valid]/cfg.soft_joint_recovery_scale_rad_s2).square().sum(-1)
-    rate_slack = ((result.recovery_rate_slack[valid]/cfg.soft_rate_recovery_scale_nm).square().sum(-1)
+    def penalty(residual):
+        if quadratic or not getattr(cfg, 'recovery_slack_huber_enabled', False):
+            return residual.square()
+        delta = cfg.recovery_slack_huber_delta
+        absolute = residual.abs()
+        small = absolute.clamp(max=delta)
+        return small.square() + 2*delta*(absolute-small)
+    slack = penalty(result.recovery_slack[valid]/cfg.soft_joint_recovery_scale_rad_s2).sum(-1)
+    rate_slack = (penalty(result.recovery_rate_slack[valid]/cfg.soft_rate_recovery_scale_nm).sum(-1)
                   if cfg.torque_rate_constraint_weight > 0 else torch.zeros_like(slack))
     per_valid = cfg.recovery_projection_weight*(torque+cfg.recovery_projection_slack_weight*slack
         + cfg.recovery_projection_rate_slack_weight*rate_slack)

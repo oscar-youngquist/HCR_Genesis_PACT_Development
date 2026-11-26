@@ -700,6 +700,12 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             # Outer projection losses (overall lambda_projection is configured above)
             'projection_contact_acceleration_weight': 0.10,  # Fixed outer stance-residual coefficient; not scheduled with inner weight.
             'recovery_projection_weight': 0.01,               # Outer recovery correction/slack multiplier before lambda_projection.
+            'recovery_slack_huber_enabled': True,             # Outer slack only; internal QP remains quadratic.
+            'recovery_slack_huber_delta': 1.0,                # Normalized residual transition (twice standard Huber).
+            'recovery_loss_budget_enabled': True,             # Detached scalar budget before warmup/PCGrad.
+            'recovery_loss_budget_ratio': 0.5,                # Fraction of the other weighted actor-physics EMA.
+            'recovery_loss_budget_ema_alpha': 0.01,           # Once-per-completed-iteration EMA update.
+            'recovery_loss_budget_reference_floor': 1e-6,     # Floor on the reference, not configured loss weights.
             'recovery_projection_slack_weight': 1.0,         # Relative outer penalty on normalized joint-envelope recovery slack.
             'recovery_projection_rate_slack_weight': 1.0,    # Relative outer rate-slack penalty; absent when QP rate constraints are off.
 

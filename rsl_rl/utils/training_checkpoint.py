@@ -186,7 +186,7 @@ def _extra_state(runner):
     if adapter(runner)=='mule': return {'schedulers':deepcopy(runner.alg.schedulers)}
     # Schedulers/scalers, if present, have their own state, not guessed scalar fields.
     return {n: deepcopy(v.state_dict()) for n, v in vars(runner.alg).items()
-            if ('scheduler' in n or 'scaler' in n) and hasattr(v, 'state_dict')}
+            if ('scheduler' in n or 'scaler' in n or n == 'recovery_loss_budget') and hasattr(v, 'state_dict')}
 
 
 def envelope(runner, *, stage_end=False):
@@ -245,6 +245,8 @@ def validate(runner, data, operation='resume', *, learning_rate=None):
     if adapter(runner) == 'hard_pact':
         from rsl_rl.algorithms.hard_pact_intervention_curriculum import legacy_extra_strength_contract
         saved = legacy_extra_strength_contract(saved,current)
+        from rsl_rl.algorithms.hard_pact_recovery_budget import legacy_recovery_contract
+        saved = legacy_recovery_contract(saved, current)
     if (adapter(runner) == 'hard_pact'
             and not (state.get('qp_curriculum') or {}).get('intervention')):
         from rsl_rl.algorithms.hard_pact_intervention_curriculum import legacy_intervention_contract
@@ -289,7 +291,14 @@ def validate(runner, data, operation='resume', *, learning_rate=None):
                 for k, v in old['state'].get(index, {}).items():
                     if torch.is_tensor(v) and k != 'step' and v.shape != p.shape:
                         raise ValueError('Optimizer moment shape mismatch: '+name+'/'+k)
-    if set(state['extra']) != set(_extra_state(runner)): raise ValueError('Scheduler/scaler inventory differs')
+    expected_extra = set(_extra_state(runner))
+    saved_extra = set(state['extra'])
+    if adapter(runner) == 'hard_pact' and 'recovery_loss_budget' not in saved_extra:
+        expected_extra.discard('recovery_loss_budget')
+        warnings.warn('Legacy checkpoint has no recovery-loss budget EMA; collecting a fresh reference.', RuntimeWarning)
+    if saved_extra != expected_extra: raise ValueError('Scheduler/scaler inventory differs')
+    if 'recovery_loss_budget' in saved_extra:
+        runner.alg.recovery_loss_budget.validate_state_dict(state['extra']['recovery_loss_budget'])
     cuda_targets=cuda_rng_targets(runner,state['rng'])
     if adapter(runner)=='mule':
         # Reuse the algorithm's stricter disposable-optimizer and schedule preflight.

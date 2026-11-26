@@ -834,7 +834,8 @@ class OnPolicyRunnerPACT:
                 'projection_recovery', 'velocity_xy', 'velocity_yaw', 'fk', 'load'))
             actor_losses = {k:v for k,v in actor_losses.items()
                             if active.get(k.split('/')[2],
-                                actor_enabled and k.rsplit('/',1)[-1] in ('total_weighted','total_warmed'))}
+                                (k.split('/')[2]=='recovery_budget' and active.get('projection_recovery',False))
+                                or (actor_enabled and k.rsplit('/',1)[-1] in ('total_weighted','total_warmed')))}
             if actor_losses:
                 scalars = torch.stack(list(actor_losses.values())).detach().cpu().tolist()
                 for name, value in zip(actor_losses, scalars):
@@ -979,6 +980,7 @@ class OnPolicyRunnerPACT:
         if self.is_hard_pact:
             # The legacy runner counter advances only after learn() finishes.
             checkpoint['hard_pact_features'] = vars(self.hard_pact_features)
+            checkpoint['hard_pact_recovery_loss_budget'] = self.alg.recovery_loss_budget.state_dict()
             qp = getattr(self.alg, 'hard_pact_qp', None)
             if qp is not None:
                 checkpoint['hard_pact_qp_velocity_loss_horizon_s'] = qp.cfg.qp_velocity_loss_horizon_s
@@ -1039,6 +1041,8 @@ class OnPolicyRunnerPACT:
             self.current_learning_iteration = 0
         if self.is_hard_pact:
             self.alg._last_completed_iteration = self.current_learning_iteration - 1
+            if 'hard_pact_recovery_loss_budget' in loaded_dict:
+                self.alg.recovery_loss_budget.load_state_dict(loaded_dict['hard_pact_recovery_loss_budget'])
             state = loaded_dict.get('hard_pact_qp_curriculum')
             if state is not None and self.alg.hard_pact_qp is not None:
                 from rsl_rl.algorithms.hard_pact_qp_curriculum import QPCurriculum
