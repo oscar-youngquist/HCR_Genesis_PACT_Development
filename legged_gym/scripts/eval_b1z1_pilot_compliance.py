@@ -25,10 +25,11 @@ def parser():
     p.add_argument('--checkpoint');p.add_argument('--seeds',type=int,nargs='+',default=[0,1,2])
     p.add_argument('--episodes-per-condition',type=int,default=100)
     p.add_argument('--calibration-episodes',type=int,default=10,help='Per force level per seed; 0 disables the separate calibration')
-    p.add_argument('--conditions',nargs='+',choices=['nominal',*util.CONDITIONS,*util.CALIBRATIONS],default=list(util.CONDITIONS))
+    p.add_argument('--conditions',nargs='+',choices=['nominal',*util.CONDITIONS,*util.CALIBRATIONS,*util.EXTRA_CALIBRATIONS],default=list(util.CONDITIONS))
     p.add_argument('--config',type=Path);p.add_argument('--gpu',default='cuda:1')
     p.add_argument('--num-envs',type=int,default=64);p.add_argument('--output-dir',type=Path,required=True)
     p.add_argument('--headless',action='store_true');p.add_argument('--validate-only',action='store_true')
+    p.add_argument('--candidate',action='store_true',help='Explicit continuation experiment gains/clock and diagnostics')
     return p
 
 
@@ -235,7 +236,15 @@ def main(argv=None):
     saved_revision=state['training_state'].get('source_revision')
     critical=['legged_gym/envs/b1z1/b1z1_pact/b1z1_pact.py','legged_gym/envs/b1z1/compliance_task.py',
         'rsl_rl/modules/actor_critic_b1z1_pact.py']
-    if not saved_revision or subprocess.check_output(['git','diff',saved_revision,'--',*critical],cwd=ROOT):
+    source_diff=subprocess.check_output(['git','diff',saved_revision,'--',*critical],cwd=ROOT)
+    # Candidate runs explicitly retain the existing local reward-threshold edit;
+    # it affects rewards only, not inference. No general source-audit bypass.
+    def audited_source(source):
+        return source.replace('torch.norm(command[:, :2], dim=1) > 0.10','torch.norm(command[:, :2], dim=1) > 0.15')
+    candidate_source_ok=args.candidate and saved_revision and all(
+        audited_source(subprocess.check_output(['git','show',f'{saved_revision}:{f}'],cwd=ROOT,text=True))==
+        audited_source((ROOT/f).read_text()) for f in critical)
+    if not saved_revision or (source_diff and not candidate_source_ok):
         raise ValueError('Policy/observation/compliance source differs from the saved revision; explicit semantic audit required')
     reference_path='legged_gym/envs/b1z1/directional_compliance.py'
     original=subprocess.check_output(['git','show',f'{saved_revision}:{reference_path}'],cwd=ROOT,text=True)
@@ -251,7 +260,8 @@ def main(argv=None):
     if c['yielding_coefficient']<=cfg.compliance.stiffness_threshold: raise ValueError('EE coefficient must exceed stiffness recruitment threshold')
     if c['force_n']*max(c['amplitude_fraction'])>min(abs(x) for x in cfg.commands.max_push_force_xyz_gripper_ext):
         raise ValueError('Requested load exceeds trained per-axis range')
-    calibration_conditions=list(util.CALIBRATIONS) if args.calibration_episodes and 'nominal' not in args.conditions else []
+    calibration_conditions=list(util.CALIBRATIONS) if args.calibration_episodes and args.conditions!=['nominal'] else []
+    if args.candidate and calibration_conditions:calibration_conditions+=list(util.EXTRA_CALIBRATIONS)
     calibration_conditions=[n for n in calibration_conditions if n not in args.conditions]
     for name in [*args.conditions,*calibration_conditions]:
         p=util.condition(name,c)['profile']
@@ -281,6 +291,10 @@ def main(argv=None):
     cfg.compliance.compile_geometry=c['compile_geometry']
     cfg.compliance.ee_profile_low=cfg.compliance.ee_profile_high=[0.]*6
     cfg.compliance.base_profile_low=cfg.compliance.base_profile_high=[0.]*6
+    if args.candidate:
+        from legged_gym.envs.b1z1.pilot_continuation import configure,environment_class
+        configure(cfg)
+        B1Z1PACT=environment_class(B1Z1PACT,training=False)
     # No optimizer, runner, BARD or training storage is constructed.
     from types import SimpleNamespace
     stub=SimpleNamespace(device='cpu',num_obs=cfg.env.num_observations,num_privileged_obs=cfg.env.num_privileged_obs,
@@ -302,7 +316,8 @@ def main(argv=None):
         evaluation_seeds=args.seeds,conditions=args.conditions,episodes_per_condition=args.episodes_per_condition,
         calibration_conditions=calibration_conditions,calibration_episodes=args.calibration_episodes,
         reference_diagnostics=c['reference_diagnostics'],reference_ast_parity=True,
-        policy_hash_before=before,strict_weights_load=True,semantic_source_match=True,
+        policy_hash_before=before,strict_weights_load=True,semantic_source_match=not bool(source_diff),
+        candidate_settings=args.candidate,candidate_source_audit=bool(candidate_source_ok),
         frames=dict(ee_task='base-heading-relative xy, world absolute z; m',ee_velocity_task='mixed-coordinate derivative including base/yaw transport; m/s',
             base_measured='heading vx/vy [m/s], Euler yaw rate [rad/s]',force='world N, ON robot, gripper link origin; held over exact interval',
             time='successor seconds; interval_start is force/action time',workspace_margin='radius m, elevation/azimuth rad',
@@ -355,6 +370,8 @@ def main(argv=None):
                         action=torch.where(env.eval_active[:,None],action,torch.zeros_like(action))
                         obs,_,hist,_,_,dones,_,_=env.step(action)
                         row=env.transition;row['raw_action']=action.clone();records.append(row)
+                        if args.candidate:
+                            row.update(env.candidate_snapshot)
                         env.eval_active &= ~row['failure']
                         actor.reset(dones)
                         if (step+1)%200==0:

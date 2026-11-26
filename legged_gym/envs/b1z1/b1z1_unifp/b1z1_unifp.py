@@ -3378,7 +3378,7 @@ class B1Z1UniFP(BaseTask):
         )
 
         moving_command = (
-            torch.norm(self.commands[:, :2], dim=1) > 0.15
+            torch.norm(self.commands[:, :2], dim=1) > 0.10
         )
 
         # Do not count falling or aerial motion as locomotion.

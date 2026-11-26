@@ -10,6 +10,7 @@ CONDITIONS = ('up_yield_up_force', 'up_yield_down_force', 'down_yield_up_force',
               'down_yield_down_force', 'ample_base_on', 'ample_base_off',
               'restricted_base_on', 'restricted_base_off')
 CALIBRATIONS=('calibration_up_30n','calibration_up_50n')
+EXTRA_CALIBRATIONS=('calibration_protected_50n',)
 EVAL_CONFIG = dict(horizon_s=16., force_on_s=5., ramp_up_s=1., force_off_s=10.,
     ramp_down_s=1., trajectory_s=3., yielding_coefficient=.5, base_coefficient=.5,
     force_n=20., amplitude_fraction=[.95,1.05], initial_yaw_rad=[-.2,.2],
@@ -50,8 +51,9 @@ def validate_config(c):
 def condition(name,c):
     profile=np.zeros(12);force=np.zeros(3)
     if name=='nominal': sphere=c['vertical_sphere']
-    elif name in CALIBRATIONS:
-        profile[5]=1.;force[2]=1.;sphere=c['vertical_sphere']
+    elif name in (*CALIBRATIONS,*EXTRA_CALIBRATIONS):
+        if name not in EXTRA_CALIBRATIONS:profile[5]=1.
+        force[2]=1.;sphere=c['vertical_sphere']
     elif name in CONDITIONS[:4]:
         profile[5 if name.startswith('up_yield') else 4]=c['yielding_coefficient']
         force[2]=1 if name.endswith('_up_force') else -1
@@ -77,7 +79,7 @@ def manifests(seed,episodes,conditions,c):
             ramp_up_s=c['ramp_up_s'],ramp_down_s=c['ramp_down_s'])
         for name in conditions:
             # Calibration uses exact forces, not the main paired amplitude jitter.
-            actual=draw if name not in CALIBRATIONS else dict(draw,force_amplitude_n=30. if name==CALIBRATIONS[0] else 50.)
+            actual=draw if name not in (*CALIBRATIONS,*EXTRA_CALIBRATIONS) else dict(draw,force_amplitude_n=30. if name==CALIBRATIONS[0] else 50.)
             rows.append(dict(seed=seed,trial_id=trial,pair_id=f'{seed}:{trial}',
                 pair_hash=fingerprint(actual),**actual,**condition(name,c)))
     return rows
@@ -108,7 +110,7 @@ def summarize(data,manifest,c,dt):
     pre=valid&(t>=c['force_on_s']-1)&(t<=c['force_on_s'])
     loaded=valid&(t>=c['force_on_s']+c['ramp_up_s']+1)&(t<=c['force_off_s'])
     recovered=valid&(t>=c['horizon_s']-2)
-    axis=2 if manifest['condition'] in (*CONDITIONS[:4],*CALIBRATIONS,'nominal') else 0
+    axis=2 if manifest['condition'] in (*CONDITIONS[:4],*CALIBRATIONS,*EXTRA_CALIBRATIONS,'nominal') else 0
     error=data['ee_task']-data['reference_task']
     deviation=data['ee_task']-data['nominal_task']
     refdev=data['reference_task']-data['nominal_task']

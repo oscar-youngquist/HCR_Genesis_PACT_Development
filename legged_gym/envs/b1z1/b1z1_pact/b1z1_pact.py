@@ -3236,7 +3236,7 @@ class B1Z1PACT(LeggedRobot):
         history_ready = self.progress_valid_steps >= minimum_history
         command = (self.compliance.target.base if getattr(self,"compliance",None) is not None
                    and self.compliance.target is not None else self.commands[:,:3])
-        moving_command = torch.norm(command[:, :2], dim=1) > 0.15
+        moving_command = torch.norm(command[:, :2], dim=1) > 0.10
 
         # Aerial motion and displacement while fallen are not valid locomotion.
         supported = self.simulator.foot_contacts.sum(dim=1) >= 2
