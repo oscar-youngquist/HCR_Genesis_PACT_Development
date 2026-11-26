@@ -417,7 +417,7 @@ def worker(args, protocol):
     args.load=protocol.get('load','light')
     for key in ('probe_extension','probe_confirmation','capture_cap','probe_source',
                 'preservation_visual','recovery_diagnostic','probe_duration','probe_cap',
-                'probe_hysteresis_rad','probe_hysteresis_m','video','discard_video','shadow_estimation'):
+                'probe_hysteresis_rad','probe_hysteresis_m','video','discard_video','shadow_estimation','momentum_sanity','momentum_sanity_correct_wrench'):
         if key in protocol:setattr(args,key,protocol[key])
     import torch
     from legged_gym.scripts.train_hard_pact import prepare_solver_runtime
@@ -444,6 +444,9 @@ def worker(args, protocol):
     task='go2_hard_pact_rss_full_isaaclab'
     cfg=copy.deepcopy(task_registry.env_cfgs[task]);apply_config(cfg,saved['environment']['resolved'])
     cfg.env.num_envs=10;cfg.seed=args.seed
+    if args.momentum_sanity:
+        from scripts.hard_pact_momentum_sanity import configure
+        configure(cfg)
     # Keep saved terrain GENERATION settings; freeze promotions via hooks only.
     set_seed(args.seed)
     env=task_registry.get_task_class(task)(cfg,class_to_dict(cfg.sim),'cuda:0',True)
@@ -474,6 +477,9 @@ def worker(args, protocol):
             s._terrain_types.copy_(terrain['terrain_types'][indices].to(env.device))
             s._env_origins.copy_(s._terrain_origins[s._terrain_levels,s._terrain_types])
             env.reset()
+            if args.momentum_sanity:
+                from scripts.hard_pact_momentum_sanity import nominal_properties
+                nominal_properties(env)
             actor=build_actor(env,training,checkpoint)
             actor.hard_pact_features=env.hard_pact_features
             from rsl_rl.modules.hard_pact_physics import GRFSwingConfig
@@ -506,6 +512,9 @@ def worker(args, protocol):
             if args.wrench_stress:
                 from scripts.hard_pact_wrench_stress import install
                 install(observer)
+            if args.momentum_sanity:
+                from scripts.hard_pact_momentum_sanity import install as install_sanity
+                install_sanity(observer,args.momentum_sanity)
             if getattr(args,'video',False):
                 from scripts.hard_pact_eval_video import Recorder
                 observer.video=Recorder(observer)
@@ -573,6 +582,8 @@ def main():
     p.add_argument('--video',action='store_true')
     p.add_argument('--discard-video',action='store_true',help='Match video runtime/render calls, discard frames without encoding')
     p.add_argument('--shadow-estimation',action='store_true',help='Eval-only owned nominal mechanics/velocity capture for causal offline inverse dynamics')
+    p.add_argument('--momentum-sanity',choices=['standing','walking'],help='Eval-only nominal mechanics and flat terrain with known load pulses')
+    p.add_argument('--momentum-sanity-correct-wrench',action='store_true',help='Sanity ONLY: compose point-force moment explicitly to bypass installed composer torque-overwrite bug')
     p.add_argument('--checkpoint',type=Path,help='Explicit immutable checkpoint from the exact event-file run')
     args=p.parse_args();args.output=args.output.resolve()
     if args.discard_video:args.video=True
@@ -593,6 +604,8 @@ def main():
     if args.intervention_sweep and not set(args.variants)<=set(INTERVENTION_VARIANTS):p.error('Invalid intervention variant')
     if args.shadow_estimation and (not args.wrench_stress or not args.intervention_sweep or 'off' in args.variants):
         p.error('Shadow capture requires a QP-enabled intervention/wrench-stress evaluation')
+    if args.momentum_sanity and not args.shadow_estimation:p.error('Momentum sanity requires shadow capture')
+    if args.momentum_sanity_correct_wrench and not args.momentum_sanity:p.error('Corrected load delivery is restricted to nominal sanity checks')
     args.output.mkdir(parents=True,exist_ok=True)
     protocol_path=args.output/'protocol.json'
     if protocol_path.exists():
@@ -621,7 +634,8 @@ def main():
             preservation_visual=args.preservation_visual,recovery_diagnostic=args.recovery_diagnostic,
             probe_duration=args.probe_duration,probe_cap=args.probe_cap,
             probe_hysteresis_rad=args.probe_hysteresis_rad,probe_hysteresis_m=args.probe_hysteresis_m,video=args.video,
-            discard_video=args.discard_video,shadow_estimation=args.shadow_estimation,
+            discard_video=args.discard_video,shadow_estimation=args.shadow_estimation,momentum_sanity=args.momentum_sanity,
+            momentum_sanity_correct_wrench=args.momentum_sanity_correct_wrench,
             argv=sys.argv,restart='Completed trials skipped; interrupted trials restart from seed, not exact PhysX.')
         protocol['config_sha256']=sha_file(Path(protocol['config']))
         protocol['diagnostic_helper_sha256']=sha_file(ROOT/'scripts/hard_pact_intervention_eval.py')

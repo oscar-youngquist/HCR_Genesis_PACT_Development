@@ -226,7 +226,7 @@ def main():
         'Contact sensor impulses/forces and continuous nominal mechanics differ at impact; start-of-interval mechanics are frozen over each backward difference.',
         'Control intervals crossing an instantaneous boundary velocity jump >1e-4 are excluded; physics intervals with position jumps >0.1m are excluded.',
         'Small solved base residual is algebraic self-consistency, NOT independent wrench accuracy.',
-        'No previously proposed numeric residual bounds found; exceedance against those bounds is unavailable, not invented.',
+        'Scalar residual bounds are reported only when explicitly requested; companion momentum reporting supplies separate per-axis base-frame bounds.',
         'Lag search is descriptive pooled +/-5 samples; correlated observations, single seed, not a significance test.'],
         torque_readback_error=stats(a['shadow_applied_torque_readback']-a['executed_torque']))
     (out/'metadata.json').write_text(json.dumps(metadata,indent=2,allow_nan=False))

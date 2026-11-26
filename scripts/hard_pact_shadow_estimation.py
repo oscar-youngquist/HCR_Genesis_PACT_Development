@@ -79,10 +79,16 @@ def capture_pre(o):
         o.record('shadow_'+key,d[key])
     o.record('shadow_velocity_before',torch.cat((o.s._robot.data.root_link_vel_w,
         o.e._canonical_joint_state()[1]),-1))
+    o.record('shadow_configuration',o.e._canonical_configuration())
     o.record('shadow_position_before',o.s._robot.data.root_link_pos_w)
     o.record('shadow_estimated_linear_body',o.actor.cenet_torso_velo[:,:3]/o.e.obs_scales.lin_vel)
     o.record('shadow_applied_wrench',o.s.hard_pact_wrench_at_base_origin_world(o.e._current_sustained_wrench_world))
     o.record('shadow_predicted_wrench',d['wrench_pred_world'])
+    composer=getattr(o.s._robot,'permanent_wrench_composer',None)
+    if composer is not None:
+        q=o.s._robot.data.body_link_quat_w[:,o.s._base_link_index][:,(1,2,3,0)]
+        o.record('shadow_composer_wrench',torch.cat((rotate(q,composer.composed_force_as_torch[:,o.s._base_link_index]),
+            rotate(q,composer.composed_torque_as_torch[:,o.s._base_link_index])),-1))
     _end_timing(o,event)
 
 
@@ -96,6 +102,7 @@ def capture_post(o):
     o.record('shadow_applied_torque_readback',o.s._robot.data.applied_torque[:,o.s._dof_indices])
     # Ground-filtered all-body contact forces; normal internal contacts excluded.
     o.record('shadow_ground_contacts',o.s.ground_total_forces_world)
+    o.record('shadow_ground_moment_world_origin',o.s.ground_moments_origin_world)
     _end_timing(o,event)
 
 
