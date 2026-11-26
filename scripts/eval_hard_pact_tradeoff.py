@@ -283,7 +283,11 @@ class Observer(matched.Observer):
             return
         if getattr(self.args,'intervention_sweep',False):
             from scripts.hard_pact_intervention_eval import pre
-            return pre(self)
+            pre(self)
+            if getattr(self.args,'shadow_estimation',False):
+                from scripts.hard_pact_shadow_estimation import capture_pre
+                capture_pre(self)
+            return
         super().pre()
         baseline=((self.e._qp_baseline_selection & (1<<self.k))!=0)
         self.record('baseline',baseline)
@@ -306,6 +310,9 @@ class Observer(matched.Observer):
         import torch
         super().post()
         self.k-=1  # inherited post advances after recording; keep matching slot
+        if getattr(self.args,'shadow_estimation',False):
+            from scripts.hard_pact_shadow_estimation import capture_post
+            capture_post(self)
         if getattr(self.args,'wrench_stress',False):
             self.record('body_velocity_after',self.body_velocity())
             self.record('applied_wrench',self.s.hard_pact_wrench_at_base_origin_world(self.e._current_sustained_wrench_world))
@@ -338,6 +345,13 @@ class Observer(matched.Observer):
             steady_wall_s=time.monotonic()-getattr(self,'warm_start',self.start),
             steady_control_steps=max(count-100,0),physical_gpu=self.args.physical_gpu)
         write_json(self.out/'progress.json',progress)
+        if getattr(self.args,'shadow_estimation',False):
+            pairs=getattr(self,'shadow_timing_events',[])
+            write_json(self.out/'shadow_capture.json',dict(
+                cuda_capture_ms=sum(start.elapsed_time(end) for start,end in pairs),
+                timed_substeps=len(pairs)//2,ground_contact_semantics=self.s.grf_semantics,
+                extra_trace_bytes=sum(v.numel()*v.element_size() for k,v in self.arrays.items() if k.startswith('shadow_')),
+                note='Warmed device-event copy timing; excludes archive compression/offline solves. Shared GPU interference possible.'))
         if complete:
             result=report.summarize(self.out)
             reset=arrays['control_reset'].astype(bool)
@@ -403,7 +417,7 @@ def worker(args, protocol):
     args.load=protocol.get('load','light')
     for key in ('probe_extension','probe_confirmation','capture_cap','probe_source',
                 'preservation_visual','recovery_diagnostic','probe_duration','probe_cap',
-                'probe_hysteresis_rad','probe_hysteresis_m','video','discard_video'):
+                'probe_hysteresis_rad','probe_hysteresis_m','video','discard_video','shadow_estimation'):
         if key in protocol:setattr(args,key,protocol[key])
     import torch
     from legged_gym.scripts.train_hard_pact import prepare_solver_runtime
@@ -558,6 +572,7 @@ def main():
     p.add_argument('--probe-hysteresis-m',type=float,default=.02)
     p.add_argument('--video',action='store_true')
     p.add_argument('--discard-video',action='store_true',help='Match video runtime/render calls, discard frames without encoding')
+    p.add_argument('--shadow-estimation',action='store_true',help='Eval-only owned nominal mechanics/velocity capture for causal offline inverse dynamics')
     p.add_argument('--checkpoint',type=Path,help='Explicit immutable checkpoint from the exact event-file run')
     args=p.parse_args();args.output=args.output.resolve()
     if args.discard_video:args.video=True
@@ -576,6 +591,8 @@ def main():
     if args.intervention_sweep and args.attitude_probe:p.error('Distinct experiments; do not combine presets')
     if args.variants is None:args.variants=list(INTERVENTION_VARIANTS)[:4] if args.intervention_sweep else list(ATTITUDE_VARIANTS if args.attitude_probe else VARIANTS)
     if args.intervention_sweep and not set(args.variants)<=set(INTERVENTION_VARIANTS):p.error('Invalid intervention variant')
+    if args.shadow_estimation and (not args.wrench_stress or not args.intervention_sweep or 'off' in args.variants):
+        p.error('Shadow capture requires a QP-enabled intervention/wrench-stress evaluation')
     args.output.mkdir(parents=True,exist_ok=True)
     protocol_path=args.output/'protocol.json'
     if protocol_path.exists():
@@ -604,7 +621,7 @@ def main():
             preservation_visual=args.preservation_visual,recovery_diagnostic=args.recovery_diagnostic,
             probe_duration=args.probe_duration,probe_cap=args.probe_cap,
             probe_hysteresis_rad=args.probe_hysteresis_rad,probe_hysteresis_m=args.probe_hysteresis_m,video=args.video,
-            discard_video=args.discard_video,
+            discard_video=args.discard_video,shadow_estimation=args.shadow_estimation,
             argv=sys.argv,restart='Completed trials skipped; interrupted trials restart from seed, not exact PhysX.')
         protocol['config_sha256']=sha_file(Path(protocol['config']))
         protocol['diagnostic_helper_sha256']=sha_file(ROOT/'scripts/hard_pact_intervention_eval.py')
@@ -622,6 +639,8 @@ def main():
         archive=args.output/'sources';archive.mkdir(exist_ok=True)
         for source in (Path(__file__),ROOT/'scripts/hard_pact_intervention_eval.py',ROOT/'scripts/report_hard_pact_tradeoff.py',Path(protocol['config'])):
             shutil.copy2(source,archive/source.name)
+        if args.shadow_estimation:
+            shutil.copy2(ROOT/'scripts/hard_pact_shadow_estimation.py',archive/'hard_pact_shadow_estimation.py')
         if args.wrench_stress:shutil.copy2(ROOT/'scripts/hard_pact_wrench_stress.py',archive/'hard_pact_wrench_stress.py')
     for seed in args.seeds:
         for variant in args.variants:
