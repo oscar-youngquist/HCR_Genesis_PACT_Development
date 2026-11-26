@@ -170,13 +170,9 @@ def _body_point_to_world(point_body, q_xyzw):
 
 
 def replay_qp_torques(desired_position, feedforward_torque, packet, feedback):
-    """Recompute both current-parameter torque inputs from detached measurements.
-
-    The QP tracks the sampled-state torque; the held GRF prediction was
-    conditioned on the control-start torque. Neither is a cached prediction.
-    """
-    if "sampled_qp_grf_conditioning_q" not in packet:
-        raise ValueError("QP replay lacks control-step GRF conditioning state")
+    """Live nominal actuator path plus the held decoder's causal torque snapshot."""
+    if "sampled_qp_grf_conditioning_torque" not in packet:
+        raise ValueError("QP replay lacks previous-executed decoder conditioning snapshot")
     def nominal(q, v):
         if "control_kp" in packet:
             return bounded_nominal_torque(desired_position,feedforward_torque,q.detach(),v.detach(),packet)
@@ -184,7 +180,7 @@ def replay_qp_torques(desired_position, feedforward_torque, packet, feedback):
             raise ValueError("QP replay requires the physical PD conversion")
         return feedforward_torque+feedback(desired_position,q.detach(),v.detach())
     return (nominal(packet["sampled_qp_q"][:,7:],packet["sampled_qp_v"][:,6:]),
-            nominal(packet["sampled_qp_grf_conditioning_q"],packet["sampled_qp_grf_conditioning_v"]))
+            packet['sampled_qp_grf_conditioning_torque'].detach())
 
 
 def disjoint_qp_epoch_mask(
@@ -325,6 +321,9 @@ class PPO_HardPACT:
                  latent_active_unit_variance_threshold=1.0e-2,
                  grf_loss_weight=1.0,
                  active_wrench_loss_weight=1.0,
+                 explicit_height_loss_weight=1.0,
+                 torso_force_loss_weights=(1.,1.,2.),
+                 grf_axis_loss_weights=(1.,1.,2.),
                  neutral_wrench_loss_weight=0.25,
                  force_decoder_diagnostics_enabled=False,
                  bard_enabled=True,
@@ -409,6 +408,14 @@ class PPO_HardPACT:
         self._latent_diagnostics_due = False
         self.grf_loss_weight = float(grf_loss_weight)
         self.active_wrench_loss_weight = float(active_wrench_loss_weight)
+        self.explicit_height_loss_weight=float(explicit_height_loss_weight)
+        self.torso_force_loss_weights=tuple(torso_force_loss_weights)
+        self.grf_axis_loss_weights=tuple(grf_axis_loss_weights)
+        import math
+        if (not math.isfinite(self.explicit_height_loss_weight) or self.explicit_height_loss_weight<0
+                or any(len(w)!=3 or any(not math.isfinite(x) or x<0 for x in w)
+                       for w in (self.torso_force_loss_weights,self.grf_axis_loss_weights))):
+            raise ValueError('Height/XYZ supervision weights must be finite nonnegative (XYZ length 3)')
         self.neutral_wrench_loss_weight = float(neutral_wrench_loss_weight)
         self.force_decoder_diagnostics_enabled = bool(
             force_decoder_diagnostics_enabled
@@ -1517,7 +1524,7 @@ class PPO_HardPACT:
                                 self.actor_critic, self.decoder,
                                 obs_batch[diagnostic_indices], obs_hist_batch[diagnostic_indices],
                                 obs_target[diagnostic_indices],
-                                replay["nominal_torque"][diagnostic_indices],
+                                self.storage.current_hard_pact_batch["previous_executed_torque"][diagnostic_indices],
                             )
                             latent_ablation_ran = True
                 self.encoder_pcgrad.zero_grad()
@@ -1525,7 +1532,7 @@ class PPO_HardPACT:
                 with self._frozen_auxiliary_decoders():
                     aux = self._compute_auxiliary_loss(
                         obs_hist_batch, obs_target, explicit_labels_batch, grf_target,
-                        terminated_batch, replay["nominal_torque"].detach(),
+                        terminated_batch, self.storage.current_hard_pact_batch["previous_executed_torque"].detach(),
                         self.storage.current_hard_pact_batch,
                         return_decoder_inputs=True,
                     )
@@ -1805,6 +1812,7 @@ class PPO_HardPACT:
     def _masked_explicit_loss(
         prediction, contact_logits, target, mask,
         contact_probability_loss_weight=1.0,
+        explicit_height_loss_weight=1.0,
     ):
         """Combine continuous MSE with independently weighted contact BCE."""
         if prediction.shape[-1] not in (11,12) or target.shape[-1] != prediction.shape[-1]:
@@ -1813,10 +1821,13 @@ class PPO_HardPACT:
         prediction = prediction[rows]
         contact_logits = contact_logits[rows]
         target = target.detach()[rows]
-        continuous_loss = torch.cat((
+        continuous = torch.cat((
             (prediction[:, :3] - target[:, :3]).square(),
             (prediction[:, 7:] - target[:, 7:]).square(),
-        ), dim=-1).mean(dim=-1)
+        ), dim=-1)
+        if prediction.shape[-1]==12:
+            continuous=continuous*continuous.new_tensor([1.]*7+[explicit_height_loss_weight])
+        continuous_loss=continuous.mean(dim=-1)
         contact_loss = F.binary_cross_entropy_with_logits(
             contact_logits, target[:, 3:7], reduction="none"
         ).mean(dim=-1)
@@ -2186,12 +2197,12 @@ class PPO_HardPACT:
             sample.detach(), explicit.detach(), nominal_torque.detach()
         )
         privileged = self._masked_mse(reconstruction, privileged_target.detach(), valid)
-        grf = normalized_grf_huber_loss(heads.grf_normalized, grf_target.detach(), valid)
+        grf = normalized_grf_huber_loss(heads.grf_normalized, grf_target.detach(), valid, axis_weights=self.grf_axis_loss_weights)
         wrench_active = normalized_wrench_huber_loss(
-            heads.wrench_raw_normalized, wrench_target.detach(), active_mask
+            heads.wrench_raw_normalized, wrench_target.detach(), active_mask, axis_weights=self.torso_force_loss_weights
         )
         wrench_neutral = normalized_wrench_huber_loss(
-            heads.wrench_raw_normalized, wrench_target.detach(), neutral_mask
+            heads.wrench_raw_normalized, wrench_target.detach(), neutral_mask, axis_weights=self.torso_force_loss_weights
         )
         result = {
             "loss": (
@@ -2267,6 +2278,7 @@ class PPO_HardPACT:
         explicit_loss = self._masked_explicit_loss(
             explicit, estimator.contact_logits, explicit_target.detach(), valid,
             self.contact_probability_loss_weight,
+            self.explicit_height_loss_weight,
         )
         per_sample_kl = -0.5 * torch.sum(
             1 + logvar - mean.square() - logvar.exp(), dim=-1
@@ -2275,7 +2287,7 @@ class PPO_HardPACT:
         kl = (per_sample_kl * weights).sum() / weights.sum().clamp_min(1.0)
 
         grf = normalized_grf_huber_loss(
-            heads.grf_normalized, grf_target.detach(), valid,
+            heads.grf_normalized, grf_target.detach(), valid, axis_weights=self.grf_axis_loss_weights,
         )
         if self._grf_diagnostics is not None:
             self._grf_diagnostics.update(
@@ -2297,10 +2309,10 @@ class PPO_HardPACT:
         active_mask = valid.bool() & active
         neutral_mask = valid.bool() & ~active
         wrench_active = normalized_wrench_huber_loss(
-            heads.wrench_raw_normalized, wrench_target, active_mask,
+            heads.wrench_raw_normalized, wrench_target, active_mask, axis_weights=self.torso_force_loss_weights,
         )
         wrench_neutral = normalized_wrench_huber_loss(
-            heads.wrench_raw_normalized, wrench_target, neutral_mask,
+            heads.wrench_raw_normalized, wrench_target, neutral_mask, axis_weights=self.torso_force_loss_weights,
         )
         loss = (
             self.privileged_loss_weight * privileged
@@ -2635,12 +2647,12 @@ class PPO_HardPACT:
             # the base origin. Rotate axes only; another r x F double-counts it.
             return total
 
-        def pinn_grf(torque):
+        def pinn_grf():
             # Both PINNs may train the GRF decoder and its latent encoder,
             # but neither may reach the actor through torque conditioning.
             # The explicit estimate is separately detached inside the head.
             grf_normalized = self.actor_critic.physics_estimator.predict_grf(
-                latent, explicit, torque.detach()
+                latent, explicit, batch['previous_executed_torque'].detach()
             ).reshape(-1, 4, 3)
             return _yaw_local_to_world(
                 self.actor_critic.physics_estimator.grf_to_physical(
@@ -2652,10 +2664,10 @@ class PPO_HardPACT:
         if compute_pinn:
             if (self.bard_inverse_enabled or self.bard_rollout_enabled
                     or self.hard_pact_features.soft_constraint_penalty):
-                # Both PINNs condition on deployment-available nominal torque,
+                # Both PINNs condition on the preceding executed torque,
                 # never the future interval-average execution label. Reuse one
                 # prediction/encoder graph for the two dynamics objectives.
-                grf_world = pinn_grf(nominal_torque)
+                grf_world = pinn_grf()
             if self.bard_rollout_enabled:
                 # Measured interval-average actuation is a fixed dynamics input,
                 # including execution-curriculum blending and final QP/fallback/
@@ -2667,7 +2679,7 @@ class PPO_HardPACT:
             if self.bard_inverse_enabled or self.bard_rollout_enabled:
                 wrench_yaw = self.actor_critic.physics_estimator.wrench_to_physical(
                     self.actor_critic.physics_estimator.predict_wrench(
-                        latent, explicit
+                        latent, explicit, batch['previous_executed_torque'].detach()
                     )
                 )
                 applied_at_base = world_wrench(
@@ -2858,7 +2870,7 @@ class PPO_HardPACT:
                 if wrench_yaw is not None
                 else self.actor_critic.physics_estimator.wrench_to_qp_physical(
                     self.actor_critic.physics_estimator.predict_wrench(
-                        qp_latent, qp_explicit
+                        qp_latent, qp_explicit, qp_batch['sampled_qp_grf_conditioning_torque'].detach()
                     )
                 )
             )

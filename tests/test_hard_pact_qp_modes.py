@@ -35,6 +35,7 @@ def fixture(mode,n=8):
     task.simulator.hard_pact_set_executed_torque=lambda tau:setattr(task.simulator,"_torques",tau.clone())
     task._legacy_task_class=SimpleNamespace(reset_idx=lambda *_:None)
     task._hard_pact_previous_substep_torque=q.clone()
+    task._hard_pact_decoder_torque=q.clone()
     task._hard_pact_q_d=torch.full_like(q,.05);task._hard_pact_tau_ff=q.clone()
     task._get_pinn_feedback=lambda d,p,v:3*(d-p)-v
     task._hard_pact_policy_latent=torch.zeros(n,16)
@@ -65,6 +66,7 @@ def test_control_reset_bounds_no_held_correction_and_current_parameter_replay(mo
     for interval in range(3):
         q.zero_();v.zero_();quat[:,2]=0.;quat[:,3]=1.
         before=heads.calls
+        task._hard_pact_decoder_torque.fill_(.1)  # completed previous interval, not current PD
         task._begin_qp_interval()
         bins=torch.bincount(task._qp_sampled_substep_index.long(),minlength=4)
         if mode != "first_plus_random_substep":
@@ -127,7 +129,9 @@ def test_control_reset_bounds_no_held_correction_and_current_parameter_replay(mo
 def test_contract_rejects_retired_modes_and_partition_preserved():
     assert HardPACTQPConfig().qp_update_mode=="random_one_substep"
     for mode in ("every_substep","random_one_substep","first_plus_random_substep"):
-        c={"schema_version":18,"qp_update":qp_update_contract(mode,4)}
+        c={"schema_version":19,"qp_update":qp_update_contract(mode,4),
+           "physics_input_semantics":"previous_completed_substep_total_torque_v2",
+           "height_label":{"version":2,"mode":"center_weighted","sigma_m":.2}}
         assert validate_qp_deployment_contract(c) is c
         assert c["qp_update"]["ppo_projection_loss_multiplier"]==1
     for mode in ("active_constraint_update","two_anchor_held_correction","single_anchor_held_correction"):

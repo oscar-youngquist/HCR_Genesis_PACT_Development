@@ -231,7 +231,7 @@ class CorrectedInverseLossTests(unittest.TestCase):
             for parameter in heads.wrench_head.parameters()
         ), 0.0)
         self.assertGreater(latent.grad.abs().sum().item(), 0.0)
-        self.assertGreater(torque.grad.abs().sum().item(), 0.0)
+        self.assertIsNone(torque.grad)  # causal executed conditioning is detached
         self.assertIsNone(explicit.grad)
 
     def test_mass_com_diagnostic_is_not_subtracted_from_applied_prediction(self):

@@ -120,11 +120,12 @@ def grf_normalized_to_physical(grf_normalized, grf_scale_n):
     )
 
 
-def normalized_grf_huber_loss(prediction, target, mask=None, delta=1.0):
+def normalized_grf_huber_loss(prediction, target, mask=None, delta=1.0, axis_weights=None):
     """Huber loss directly in the dedicated GRF decoder's normalized space."""
-    loss = F.huber_loss(
-        prediction, target, delta=delta, reduction="none"
-    ).mean(dim=-1)
+    loss = F.huber_loss(prediction, target, delta=delta, reduction="none")
+    if axis_weights is not None:
+        loss = loss * prediction.new_tensor(axis_weights).repeat(4)
+    loss = loss.mean(dim=-1)
     if mask is None:
         return loss.mean()
     weights = mask.reshape(-1).to(loss.dtype)
@@ -344,11 +345,12 @@ def sanitize_and_clip_wrench_for_qp(
     return finite.clamp(min=-limit, max=limit)
 
 
-def normalized_wrench_huber_loss(prediction, target, mask=None, delta=1.0):
+def normalized_wrench_huber_loss(prediction, target, mask=None, delta=1.0, axis_weights=None):
     """Huber loss directly between unbounded normalized wrench tensors."""
-    loss = F.huber_loss(
-        prediction, target, delta=delta, reduction="none"
-    ).mean(dim=-1)
+    loss = F.huber_loss(prediction, target, delta=delta, reduction="none")
+    if axis_weights is not None:
+        loss = loss * prediction.new_tensor(tuple(axis_weights)+(1.,1.,1.))
+    loss = loss.mean(dim=-1)
     if mask is None:
         return loss.mean()
     weights = mask.reshape(-1).to(loss.dtype)
@@ -451,8 +453,21 @@ def compose_explicit_estimator_target(
     return target if terrain_relative_height is None else torch.cat((target,terrain_relative_height.reshape(-1,1)),dim=-1)
 
 
-def terrain_relative_torso_height(base_position, measured_heights):
-    """Same terrain-patch mean used by the existing base-height reward/termination."""
+def height_sample_weights(points, mode='center_weighted', sigma=0.20):
+    """Precompute normalized weights in the existing torso-relative sample order."""
+    if mode not in ('center_weighted','uniform'):
+        raise ValueError('height_label_mode must be center_weighted or uniform')
+    if not math.isfinite(sigma) or sigma<=0:
+        raise ValueError('height_label_sigma_m must be finite and positive')
+    if mode=='uniform':return torch.ones_like(points[...,0])/points.shape[-2]
+    # Softmax is the normalized Gaussian and avoids all-zero underflow.
+    return torch.softmax(-points[...,:2].square().sum(-1)/(2*sigma*sigma),dim=-1)
+
+
+def terrain_relative_torso_height(base_position, measured_heights, weights=None):
+    """Estimator label; absent weights retain the legacy uniform convention."""
+    if weights is not None:
+        return base_position[:,2:3]-(measured_heights*weights).sum(-1,keepdim=True)
     return (base_position[:,2:3]-measured_heights).mean(dim=-1,keepdim=True)
 
 
@@ -671,6 +686,8 @@ class DeploymentPhysicsHeads(nn.Module):
         wrench_scale=None,
         wrench_qp_clip=None,
         grf_swing=None,
+        height_label_mode='center_weighted',
+        height_label_sigma_m=.20,
     ):
         super().__init__()
         self.latent_dim = int(latent_dim)
@@ -680,7 +697,7 @@ class DeploymentPhysicsHeads(nn.Module):
             latent_dim + explicit_dim + 12, grf_hidden_layers, 12
         )
         self.wrench_head = _physics_head(
-            latent_dim + explicit_dim, wrench_hidden_layers, 6
+            latent_dim + explicit_dim + 12, wrench_hidden_layers, 6
         )
         if grf_scale_n is None or wrench_scale is None or wrench_qp_clip is None:
             raise ValueError(
@@ -696,6 +713,11 @@ class DeploymentPhysicsHeads(nn.Module):
         # Semantic guard also covers raw model/weights-only loads, not just
         # full training envelopes. Old point-wrench heads are not interchangeable.
         self.register_buffer('wrench_origin_semantics', torch.tensor(3, dtype=torch.int64))
+        self.register_buffer('physics_input_semantics', torch.tensor(2, dtype=torch.int64))
+        if height_label_mode not in ('center_weighted','uniform') or not math.isfinite(height_label_sigma_m) or height_label_sigma_m<=0:
+            raise ValueError('Invalid height label mode/sigma')
+        self.register_buffer('height_label_semantics',torch.tensor(
+            [2.,float(height_label_mode=='center_weighted'),height_label_sigma_m],dtype=torch.float64))
         self.register_buffer(
             "wrench_qp_clip",
             torch.as_tensor(wrench_qp_clip, dtype=torch.float32),
@@ -710,6 +732,12 @@ class DeploymentPhysicsHeads(nn.Module):
             raise ValueError("wrench_qp_clip must contain 6 values")
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        semantics=state_dict.get(prefix+'physics_input_semantics')
+        if semantics is None or semantics.numel()!=1 or int(semantics)!=2:
+            raise RuntimeError('Incompatible physics inputs: expected v2 previous-executed-total-torque conditioning; legacy nominal-torque heads require explicit retraining/migration')
+        height=state_dict.get(prefix+'height_label_semantics')
+        if height is None or not torch.equal(height.to(self.height_label_semantics),self.height_label_semantics):
+            raise RuntimeError('Incompatible explicit height label semantics/mode/sigma; explicit retraining/migration required')
         marker = state_dict.get(prefix+'wrench_origin_semantics')
         if marker is None or marker.numel() != 1 or int(marker) != 3:
             raise RuntimeError('Incompatible HardPACT wrench origin: expected v3 applied wrench about base-link origin; old application-point heads require explicit retraining/migration, not a silent load')
@@ -717,6 +745,9 @@ class DeploymentPhysicsHeads(nn.Module):
 
     def forward(self, latent_sample, explicit, nominal_torque):
         """Evaluate both heads from the reparameterized training sample.
+
+        The historical ``nominal_torque`` argument name now denotes the
+        previous completed substep's total executed torque in physical Nm.
 
         ``explicit`` conditions the predictions by value only.  Detaching it
         at each decoder boundary prevents either physics loss from optimizing
@@ -729,18 +760,17 @@ class DeploymentPhysicsHeads(nn.Module):
                 "HardPACT physics-head input dimensions do not match configuration"
             )
         if nominal_torque.shape[-1] != 12:
-            raise ValueError("nominal torque must be 12-D")
+            raise ValueError("previous executed total torque must be 12-D")
         grf = self.predict_grf(latent_sample, explicit, nominal_torque)
-        wrench = self.predict_wrench(latent_sample, explicit)
+        wrench = self.predict_wrench(latent_sample, explicit, nominal_torque)
         return PhysicsHeadOutput(
             grf, wrench,
         )
 
     def predict_grf(self, latent_sample, explicit, nominal_torque):
-        """Evaluate only the torque-conditioned head.
+        """Control-rate prediction; torque is the detached causal execution snapshot.
 
-        Rollout calls this once per physics substep, so keeping it separate
-        avoids redundantly evaluating the control-rate wrench head.
+        Argument name retained for source compatibility, not nominal-action semantics.
         """
         if (latent_sample.shape[-1] != self.latent_dim
                 or explicit.shape[-1] != self.explicit_dim):
@@ -748,10 +778,10 @@ class DeploymentPhysicsHeads(nn.Module):
                 "HardPACT physics-head input dimensions do not match configuration"
             )
         if nominal_torque.shape[-1] != 12:
-            raise ValueError("nominal torque must be 12-D")
+            raise ValueError("previous executed total torque must be 12-D")
         stopped_explicit = explicit.detach()
         return self.grf_head(
-            torch.cat((latent_sample, stopped_explicit, nominal_torque), dim=-1)
+            torch.cat((latent_sample, stopped_explicit, nominal_torque.detach()), dim=-1)
         )
 
     def grf_to_physical(self, prediction_normalized):
@@ -805,16 +835,18 @@ class DeploymentPhysicsHeads(nn.Module):
             }
         return loss, statistics
 
-    def predict_wrench(self, latent_sample, explicit):
-        """Evaluate the unbounded wrench head from a sampled latent."""
+    def predict_wrench(self, latent_sample, explicit, previous_executed_torque):
+        """Unbounded wrench; same held causal torque snapshot as the GRF head."""
         if (latent_sample.shape[-1] != self.latent_dim
                 or explicit.shape[-1] != self.explicit_dim):
             raise ValueError(
                 "HardPACT physics-head input dimensions do not match configuration"
             )
         stopped_explicit = explicit.detach()
+        if previous_executed_torque.shape[-1] != 12:
+            raise ValueError("previous executed total torque must be 12-D")
         return self.wrench_head(
-            torch.cat((latent_sample, stopped_explicit), dim=-1)
+            torch.cat((latent_sample, stopped_explicit, previous_executed_torque.detach()), dim=-1)
         )
 
     def wrench_to_physical(self, prediction_normalized):

@@ -341,7 +341,9 @@ class Observer(matched.Observer):
             feet=self.s._robot.data.body_link_pos_w[:,self.s._feet_indices,:]
             self.record('foot_clearance',feet[:,:,2]-self.s.height_around_feet.mean(-1)-self.e.cfg.rewards.foot_height_offset)
             self.record('height_after',self.s._robot.data.root_link_pos_w[:,2]-self.s.measured_heights.mean(-1))
-        height=(self.s.base_pos[:,2:3]-self.s.measured_heights).mean(-1)
+        from rsl_rl.modules.hard_pact_physics import terrain_relative_torso_height
+        height=terrain_relative_torso_height(self.s.base_pos,self.s.measured_heights,
+            getattr(self.e,'_explicit_height_weights',None)).squeeze(-1)
         self.record('height_estimate_error',self.actor.cenet_torso_velo[:,11]-height)
         if hasattr(self.s,'feet_vel'):
             self.record('stance_slip',self.s.feet_vel[:,:,:2].norm(dim=-1)*self.e.grf_processor.contacts)

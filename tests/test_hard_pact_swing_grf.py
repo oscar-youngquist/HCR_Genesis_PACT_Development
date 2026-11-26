@@ -164,13 +164,13 @@ def test_config_contract_and_strict_pos_migration():
     keys = set(hard.state_dict())
     for cfg_class, actor in ((GO2HardPACTPosCfg, pos), (GO2HardPACTCfg, hard)):
         cfg = cfg_class()
-        assert GRFSwingConfig.from_task(cfg) == GRFSwingConfig()
+        # Task configs may enable swing supervision; explicitly test overrides.
         cfg.deployment_physics.grf_swing_gating_enabled = True
         cfg.deployment_physics.grf_swing_contact_threshold = .6
         cfg.deployment_physics.grf_swing_loss_weight = .2
         actor.physics_estimator.grf_swing = GRFSwingConfig.from_task(cfg)
         contract = build_deployment_contract(cfg, actor, calculate_physics_head_gains(cfg))
-        assert contract["schema_version"] == 10
+        assert contract["schema_version"] == 19
         assert contract["grf_swing_gating"]["enabled"]
         assert contract["grf_swing_gating"]["contact_probability_threshold"] == .6
         assert contract["grf_swing_gating"]["consistency_loss_weight"] == .2

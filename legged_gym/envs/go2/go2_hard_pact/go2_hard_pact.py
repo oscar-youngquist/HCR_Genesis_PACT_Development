@@ -14,7 +14,7 @@ from rsl_rl.modules.hard_pact_control import (
 from rsl_rl.modules.hard_pact_physics import (
     log_qp_swing_grf,
     compose_explicit_estimator_target,
-    terrain_relative_torso_height, estimated_qp_height_inputs,
+    terrain_relative_torso_height, height_sample_weights, estimated_qp_height_inputs,
     normalize_grf_target,
     normalize_wrench_target,
 )
@@ -343,6 +343,10 @@ class Go2HardPACT(Go2PACT):
 
     def _init_buffers(self):
         self._legacy_task_class._init_buffers(self)
+        self._explicit_height_weights=height_sample_weights(
+            self.simulator._height_points[0],
+            getattr(self.cfg.deployment_physics,'height_label_mode','uniform'),
+            getattr(self.cfg.deployment_physics,'height_label_sigma_m',.20))
         self.domain_rand_curriculum = HardPACTDomainRandCurriculum(
             self.cfg, seed=int(getattr(self.cfg, "seed", 0))
         )
@@ -757,7 +761,7 @@ class Go2HardPACT(Go2PACT):
             self._hard_pact_policy_context_ready = False
             getattr(self, "extras", {}).pop("hard_pact_qp_interval", None)
 
-    def set_hard_pact_policy_context(self, latent, explicit):
+    def set_hard_pact_policy_context(self, latent, explicit, previous_executed_torque):
         """Hold policy-rate features and wrench prediction for one interval."""
         if not self._hard_pact_rollout_qp_enabled:
             return
@@ -765,11 +769,13 @@ class Go2HardPACT(Go2PACT):
         # graph or autocast activation survives across simulator substeps.
         self._hard_pact_policy_latent = latent.detach().float()
         self._hard_pact_policy_explicit = explicit.detach().float()
+        self._hard_pact_decoder_torque = previous_executed_torque.detach().clone()
         with torch.no_grad():
             self._hard_pact_wrench_raw_normalized = (
                 self._hard_pact_actor_critic.physics_estimator.predict_wrench(
                     self._hard_pact_policy_latent,
                     self._hard_pact_policy_explicit,
+                    self._hard_pact_decoder_torque,
                 ).detach()
             )
         self._hard_pact_policy_context_ready = True
@@ -1104,17 +1110,13 @@ class Go2HardPACT(Go2PACT):
     def _prepare_qp_control_predictions(self):
         """Run once BEFORE simulator.step, never from a physics callback."""
         qj,vj = self._canonical_joint_state()
-        if hasattr(self,"_hard_pact_control_parameters"):
-            nominal = bounded_nominal_torque(self._hard_pact_q_d,self._hard_pact_tau_ff,
-                qj,vj,self._hard_pact_control_parameters)
-        else:
-            nominal = self._hard_pact_tau_ff+self._get_pinn_feedback(self._hard_pact_q_d,qj,vj)
+        conditioning_torque = self._hard_pact_decoder_torque
         self._qp_grf_conditioning_q.copy_(qj)
         self._qp_grf_conditioning_v.copy_(vj)
-        self._qp_grf_conditioning_torque.copy_(nominal)
+        self._qp_grf_conditioning_torque.copy_(conditioning_torque)
         heads = self._hard_pact_actor_critic.physics_estimator
         self._qp_control_grf = heads.grf_to_physical(heads.predict_grf(
-            self._hard_pact_policy_latent,self._hard_pact_policy_explicit,nominal
+            self._hard_pact_policy_latent,self._hard_pact_policy_explicit,conditioning_torque
         )).reshape(-1,4,3).detach()
         self._qp_control_wrench = heads.wrench_to_qp_physical(
             self._hard_pact_wrench_raw_normalized).detach()
@@ -1192,7 +1194,7 @@ class Go2HardPACT(Go2PACT):
                         self._hard_pact_policy_explicit[rows],q[:,3:7],qp.cfg.height_velocity_obs_scale))
                     if qp._physical_enabled():
                         tracking_inputs['diagnostic_height_truth'] = terrain_relative_torso_height(
-                            self.simulator.base_pos[rows],self.simulator.measured_heights[rows])
+                            self.simulator.base_pos[rows],self.simulator.measured_heights[rows],self._explicit_height_weights)
                 if qp.cfg.endpoint_torque_constraints:
                     tracking_inputs.update({key: value[rows] for key, value in
                         effective_feedback_gains(self._hard_pact_control_parameters).items()})
@@ -1662,7 +1664,8 @@ class Go2HardPACT(Go2PACT):
             self.simulator.base_lin_vel * self.obs_scales.lin_vel,
             self.grf_processor.contacts.float(),
             clearance,
-            terrain_relative_torso_height(self.simulator.base_pos,self.simulator.measured_heights),
+            terrain_relative_torso_height(self.simulator.base_pos,self.simulator.measured_heights,
+                                          getattr(self,'_explicit_height_weights',None)),
         )
         if getattr(self, "_pending_disturbance_transition", None) is not None:
             disturbance_frame = pack_disturbance_fields(
@@ -1811,7 +1814,7 @@ class Go2HardPACT(Go2PACT):
             # step has a policy context and therefore executes the substep QP.
             if actor.cenet_z is not None and actor.cenet_torso_velo is not None:
                 self.set_hard_pact_policy_context(
-                    actor.cenet_z, actor.cenet_torso_velo
+                    actor.cenet_z, actor.cenet_torso_velo, previous_executed_torque
                 )
 
         # Shift in lockstep with the legacy action queue. A false entry means
@@ -1939,6 +1942,7 @@ class Go2HardPACT(Go2PACT):
             "_hard_pact_requested_feedforward", "_hard_pact_first_requested_feedback",
             "_hard_pact_bounded_nominal_torque", "_hard_pact_executed_torque",
             "_hard_pact_previous_substep_torque",
+            "_hard_pact_decoder_torque",
             "_hard_pact_execution_feedforward_command", "_hard_pact_execution_feedforward_physical",
             "_hard_pact_execution_feedforward_available",
             "_hard_pact_torque_rate_penalty_sum", "_hard_pact_torque_rate_penalty_count",

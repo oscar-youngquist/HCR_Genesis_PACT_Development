@@ -218,7 +218,7 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         (output.grf_normalized.sum() + output.wrench_raw_normalized.sum()).backward()
         self.assertIsNone(explicit.grad)
         self.assertGreater(latent.grad.abs().sum().item(), 0.0)
-        self.assertGreater(nominal.grad.abs().sum().item(), 0.0)
+        self.assertIsNone(nominal.grad)  # preceding executed torque is conditioning only
 
     def test_both_variants_feed_sampled_latent_and_detached_explicit_to_heads(self):
         history = torch.randn(3, 57 * 20)
@@ -284,7 +284,7 @@ class ExplicitEstimatorAndHeadTests(unittest.TestCase):
         )
         self.assertEqual(
             [(layer.in_features, layer.out_features) for layer in wrench_linears],
-            [(27, 23), (23, 19), (19, 13), (13, 6)],
+            [(39, 23), (23, 19), (19, 13), (13, 6)],
         )
 
     def test_actor_policy_uses_sample_and_explicit_uses_shared_features(self):
@@ -537,7 +537,7 @@ class GainAndScalingTests(unittest.TestCase):
         )
         latent = torch.randn(3, 16, requires_grad=True)
         explicit = torch.randn(3, 11)
-        raw = head.predict_wrench(latent, explicit)
+        raw = head.predict_wrench(latent, explicit, torch.zeros(3,12))
         physical = head.wrench_to_physical(raw)
         torch.testing.assert_close(
             physical, raw * torch.tensor(gains.wrench_scale_n_nm)
@@ -553,7 +553,7 @@ class GainAndScalingTests(unittest.TestCase):
             head.wrench_head[-1].weight.zero_()
             head.wrench_head[-1].bias.fill_(10.0)
         torch.testing.assert_close(
-            head.predict_wrench(latent.detach(), explicit), torch.full((3, 6), 10.0)
+            head.predict_wrench(latent.detach(), explicit, torch.zeros(3,12)), torch.full((3, 6), 10.0)
         )
 
     def test_fixed_wrench_contract_is_fully_materialized(self):
@@ -823,8 +823,8 @@ class GainAndScalingTests(unittest.TestCase):
         checkpoint = build_hard_pact_start_checkpoint(pos.state_dict(), {}, 3)
         hard.load_state_dict(checkpoint["model_state_dict"], strict=True)
         latent, explicit = torch.randn(3, 16), torch.randn(3, 11)
-        pos_normalized = pos.physics_estimator.predict_wrench(latent, explicit)
-        hard_normalized = hard.physics_estimator.predict_wrench(latent, explicit)
+        pos_normalized = pos.physics_estimator.predict_wrench(latent, explicit, torch.zeros(3,12))
+        hard_normalized = hard.physics_estimator.predict_wrench(latent, explicit, torch.zeros(3,12))
         torch.testing.assert_close(hard_normalized, pos_normalized, rtol=0, atol=0)
         torch.testing.assert_close(
             hard.physics_estimator.wrench_to_physical(hard_normalized),
@@ -857,13 +857,15 @@ class DeploymentContractTests(unittest.TestCase):
             self.assertTrue(wrote)
             with open(path, encoding="utf-8") as stream:
                 first_text = stream.read()
-            _, wrote_again = write_deployment_contract_once(directory, {"bad": True})
+            _, wrote_again = write_deployment_contract_once(directory, contract)
             self.assertFalse(wrote_again)
+            with self.assertRaises(ValueError):
+                write_deployment_contract_once(directory, {"bad": True})
             with open(path, encoding="utf-8") as stream:
                 self.assertEqual(stream.read(), first_text)
             loaded = json.loads(first_text)
 
-        self.assertEqual(loaded["schema_version"], 18)
+        self.assertEqual(loaded["schema_version"], 19)
         self.assertFalse(loaded["actuator_execution"]["clip_torque_rate_without_qp"])
         self.assertEqual(loaded["actuator_execution"]["torque_rate_limit_nm_s"], cfg.control.torque_rate_limit_nm_s)
         self.assertEqual(loaded["torque_convention"]["conversion_helper"],

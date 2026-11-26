@@ -263,7 +263,8 @@ class Observer:
                 self.qp.cfg.torque_rate_limit_nm_s, float(e.cfg.sim.dt)))
         if not is_qp:
             normalized = self.actor.physics_estimator.predict_grf(
-                self.actor.cenet_z, self.actor.cenet_torso_velo, nominal)
+                self.actor.cenet_z, self.actor.cenet_torso_velo,
+                e._pending_disturbance_transition['previous_executed_torque'])
             self.pred_force = e._yaw_local_to_world(
                 self.actor.physics_estimator.grf_to_physical(normalized).reshape(-1, 4, 3),
                 e._current_base_quat_xyzw())
@@ -429,6 +430,8 @@ def build_actor(env, training, checkpoint):
         wrench_decoder_layers=p["wrench_decoder_layers"], grf_scale_n=gains.grf_scale_n,
         wrench_scale=gains.wrench_scale_n_nm, wrench_qp_clip=gains.wrench_qp_clip_n_nm,
         contact_epsilon=p["contact_epsilon"],
+        height_label_mode=getattr(env.cfg.deployment_physics,'height_label_mode','uniform'),
+        height_label_sigma_m=getattr(env.cfg.deployment_physics,'height_label_sigma_m',.20),
     ).to(env.device)
     actor.load_state_dict(checkpoint["model_state_dict"], strict=True)
     actor.eval().requires_grad_(False)
@@ -569,7 +572,8 @@ def worker(args):
                     observer.metrics.add(f"finite/{name}", torch.isfinite(value))
                 heads = actor.physics_estimator
                 wrench_normalized = (env._hard_pact_wrench_raw_normalized if step >= PREFIX and mode is not None
-                                     else heads.predict_wrench(actor.cenet_z, actor.cenet_torso_velo))
+                                     else heads.predict_wrench(actor.cenet_z, actor.cenet_torso_velo,
+                                         env._pending_disturbance_transition['previous_executed_torque']))
                 raw = heads.wrench_to_physical(wrench_normalized)
                 clipped = heads.wrench_to_qp_physical(wrench_normalized)
                 target = env._pending_disturbance_transition["total_external_wrench_label_yaw_normalized"] * heads.wrench_scale

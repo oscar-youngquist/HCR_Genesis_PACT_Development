@@ -443,6 +443,8 @@ class GO2HardPACTPosCfg(LeggedRobotCfg):
             heading = [-3.14, 3.14]
 
     class deployment_physics:
+        height_label_mode = 'center_weighted'
+        height_label_sigma_m = 0.20
         # Gate only the QP GRF reference; raw supervised predictions stay intact.
         grf_swing_gating_enabled = False
         grf_swing_contact_threshold = 0.5
@@ -510,7 +512,10 @@ class GO2HardPACTPosCfgPPO(LeggedRobotCfgPPO):
         latent_active_unit_variance_threshold = 1e-2
 
         grf_loss_weight = 1.0
-        active_wrench_loss_weight = 1.0
+        active_wrench_loss_weight = 2.0
+        explicit_height_loss_weight = 4.0
+        torso_force_loss_weights = [1.0, 1.0, 2.0]
+        grf_axis_loss_weights = [1.0, 1.0, 2.0]
         neutral_wrench_loss_weight = 1.0
 
         # Detailed physical GRF/base-wrench TensorBoard reductions. Decoder

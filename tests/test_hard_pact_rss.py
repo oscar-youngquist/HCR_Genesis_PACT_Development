@@ -211,6 +211,7 @@ def test_tiny_real_ppo_update(variant):
         total_external_wrench_label_yaw_normalized=z(6),sustained_wrench_active_mask=z(1).bool(),
         total_external_wrench_label_world=z(6),realized_added_mass=z(1),realized_com_shift_body=z(3),
         **{k:z(1).bool() for k in ('push_event_mask','reset_mask','timeout_mask','teleport_mask')})
+    fields['previous_executed_torque']=z(12)
     s.hard_pact_fields=fields
     J,B,W,g,stance=allocation_inputs()
     J,B,g=J.float(),B.float(),g.float()
@@ -225,6 +226,7 @@ def test_tiny_real_ppo_update(variant):
         fields.update(sampled_qp_q=q.clone(),sampled_qp_v=z(18),physics_dt=z(1)+.005,
             sampled_qp_velocity_command=z(3)+.2,sampled_qp_grf_conditioning_q=q[...,7:].clone(),
             sampled_qp_grf_conditioning_v=z(12),sampled_qp_previous_torque=z(12),
+            sampled_qp_grf_conditioning_torque=z(12),
             sampled_qp_valid=torch.ones(steps,n,1,dtype=torch.bool),sampled_qp_substep_index=z(1).long())
         def mechanics(q,v,batch):
             d=inputs(q.shape[0],q.dtype)

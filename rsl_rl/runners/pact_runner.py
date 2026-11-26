@@ -126,6 +126,8 @@ class OnPolicyRunnerPACT:
                 "grf_decoder_layers": self.policy_cfg["grf_decoder_layers"],
                 "wrench_decoder_layers": self.policy_cfg["wrench_decoder_layers"],
                 "grf_scale_n": gain_spec.grf_scale_n,
+                "height_label_mode": getattr(self.env.cfg.deployment_physics,'height_label_mode','uniform'),
+                "height_label_sigma_m": getattr(self.env.cfg.deployment_physics,'height_label_sigma_m',.20),
                 "wrench_scale": gain_spec.wrench_scale_n_nm,
                 "wrench_qp_clip": gain_spec.wrench_qp_clip_n_nm,
                 "grf_swing": GRFSwingConfig.from_task(self.env.cfg),

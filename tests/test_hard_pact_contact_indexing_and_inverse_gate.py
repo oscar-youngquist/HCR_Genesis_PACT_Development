@@ -105,6 +105,7 @@ def _run_owned_update(qp_mode,device):
     q[..., 2], q[..., 6] = .4, 1.
     q[..., 7:] = torch.tensor([0., .8, -1.5] * 4)
     fields = {
+        "previous_executed_torque": zeros(12)+.15,
         "pre_q": q, "pre_v": zeros(18), "post_v": zeros(18),
         "control_dt": torch.full((2, 4, 1), .02),
         # Rows represent bounded non-QP, successful-QP, and fallback commands;
@@ -135,6 +136,7 @@ def _run_owned_update(qp_mode,device):
             sampled_qp_velocity_command=torch.full((2,4,3),.2),
             sampled_qp_grf_conditioning_q=q[..., 7:].clone(),
             sampled_qp_grf_conditioning_v=zeros(12),
+            sampled_qp_grf_conditioning_torque=fields['previous_executed_torque'].clone(),
             sampled_qp_previous_torque=zeros(12),
             sampled_qp_valid=torch.ones(2,4,1,dtype=torch.bool),
             sampled_qp_substep_index=torch.arange(4).reshape(1,4,1).expand(2,4,1).clone(),
@@ -276,5 +278,5 @@ def _run_owned_update(qp_mode,device):
                                rtol=0, atol=0)
     pinn_torques = [t for t,requires_grad in grf_torques if not requires_grad]
     assert pinn_torques
-    torch.testing.assert_close(pinn_torques[0], replayed_nominal[0], rtol=0, atol=0)
+    torch.testing.assert_close(pinn_torques[0], fields['previous_executed_torque'].flatten(0,1), rtol=0, atol=0)
     assert not torch.equal(pinn_torques[0].sort(dim=0).values, expected_torques)

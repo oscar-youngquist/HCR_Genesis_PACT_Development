@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 import os
 import warnings
 from rsl_rl.modules.hard_pact_physics import GRFSwingConfig
@@ -172,7 +173,11 @@ def build_deployment_contract(cfg, actor, gain_spec):
     swing_config = GRFSwingConfig.from_task(cfg)
     features = getattr(actor, 'hard_pact_features', None)
     contract = {
-        "schema_version": 18,
+        "schema_version": 19,
+        "physics_input_semantics": "previous_completed_substep_total_torque_v2",
+        "height_label": {"version":2,"mode":getattr(cfg.deployment_physics,'height_label_mode','uniform'),
+            "sigma_m":getattr(cfg.deployment_physics,'height_label_sigma_m',.20),
+            "reward_termination":"unchanged uniform terrain-patch mean"},
         "rss_features": (vars(features) if features is not None and features.variant_id.startswith('rss_') else None),
         "policy_action_mode": "position" if actor.std.numel() == 12 else "coupled",
         "policy_action_dimension": actor.std.numel(),
@@ -249,7 +254,7 @@ def build_deployment_contract(cfg, actor, gain_spec):
                 {"name": "foot_contact_probability", "dimension": 4, "order": list(FOOT_ORDER), "units": "probability", "scaling": "epsilon + (1 - 2*epsilon) * sigmoid(contact_logits)", "clipping": None},
                 {"name": "foot_clearance", "dimension": 4, "order": list(FOOT_ORDER), "units": "m", "scaling": 1.0, "clipping": [-1.0, 1.0]},
             ] + ([{"name":"terrain_relative_torso_height","dimension":1,"units":"m","scaling":1.0,"clipping":None,
-                   "label":"mean(base_position_z - measured_terrain_patch_heights)"}] if explicit_dim==12 else []),
+                   "label":"base_z - weighted terrain mean; see height_label"}] if explicit_dim==12 else []),
         },
         "contact_estimator_supervision": {
             "raw_output": "contact_logits",
@@ -273,7 +278,7 @@ def build_deployment_contract(cfg, actor, gain_spec):
         "deployment_heads": {
             "activation": "ELU",
             "grf": {
-                "input_order": ["z_t", "stopgrad(explicit_t)", "tau_nom"],
+                "input_order": ["z_t", "stopgrad(explicit_t)", "stopgrad(previous_executed_total_torque)"],
                 "input_dimension": latent_dim + explicit_dim + 12,
                 "hidden_layers": _hidden_linear_widths(actor.physics_estimator.grf_head),
                 "output_dimension": 12,
@@ -283,8 +288,8 @@ def build_deployment_contract(cfg, actor, gain_spec):
                 "grf_scale_n": grf_buffer,
             },
             "base_wrench": {
-                "input_order": ["z_t", "stopgrad(explicit_t)"],
-                "input_dimension": latent_dim + explicit_dim,
+                "input_order": ["z_t", "stopgrad(explicit_t)", "stopgrad(previous_executed_total_torque)"],
+                "input_dimension": latent_dim + explicit_dim + 12,
                 "hidden_layers": _hidden_linear_widths(actor.physics_estimator.wrench_head),
                 "output_dimension": 6,
                 "output": "unbounded_raw_normalized_yaw_local_wrench",
@@ -389,7 +394,8 @@ def write_deployment_contract_once(log_dir, contract):
         with open(path, encoding="utf-8") as stream:
             existing = json.load(stream)
         validate_qp_deployment_contract(existing)
-        if existing.get("qp_update") != contract.get("qp_update"):
+        if any(existing.get(key) != contract.get(key) for key in
+               ('qp_update','height_label','physics_input_semantics')):
             raise ValueError("Incompatible existing QP deployment contract; export to a new run directory")
         return path, False
     return path, True
@@ -397,8 +403,14 @@ def write_deployment_contract_once(log_dir, contract):
 
 def validate_qp_deployment_contract(contract):
     """Reject old held/active execution contracts rather than reinterpret them."""
-    if contract.get("schema_version") != 18:
+    if contract.get("schema_version") != 19:
         raise ValueError("Incompatible HardPACT deployment schema/wrench origin; old heads require explicit migration or retraining, not metadata-only re-export")
+    if contract.get('physics_input_semantics') != 'previous_completed_substep_total_torque_v2':
+        raise ValueError('Incompatible HardPACT decoder torque semantics')
+    height=contract.get('height_label',{})
+    if (height.get('version')!=2 or height.get('mode') not in ('uniform','center_weighted')
+            or not math.isfinite(height.get('sigma_m',float('nan'))) or height['sigma_m']<=0):
+        raise ValueError('Incompatible HardPACT height label semantics')
     if 'frames_and_units' in contract:
         wrench = contract['frames_and_units'].get('base_wrench', {})
         if (wrench.get('target_semantics_version') != 3 or

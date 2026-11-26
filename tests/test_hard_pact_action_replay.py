@@ -303,6 +303,7 @@ class StochasticActionReplayTests(unittest.TestCase):
         transition["sampled_qp_velocity_command"] = torch.zeros(3, 3)
         transition["sampled_qp_grf_conditioning_q"] = transition["pre_q"][:,7:].clone()
         transition["sampled_qp_grf_conditioning_v"] = transition["pre_v"][:,6:].clone()
+        transition["sampled_qp_grf_conditioning_torque"] = torch.randn(3,12)
         rollout = bounded_nominal_torque(
             replay["desired_position"].detach(), replay["feedforward_torque"].detach(),
             sampled_q, sampled_qdot, transition)
@@ -336,10 +337,7 @@ class StochasticActionReplayTests(unittest.TestCase):
         replayed = algorithm.hard_pact_qp.solve.call_args.kwargs["tau_nom"]
         torch.testing.assert_close(replayed, rollout, rtol=0, atol=0)
         qp_forces = algorithm.hard_pact_qp.solve.call_args.kwargs["force_pred_world"]
-        grf_torque = (bounded_nominal_torque(
-            replay["desired_position"], replay["feedforward_torque"],
-            transition["pre_q"][:, 7:], transition["pre_v"][:, 6:], transition,
-        ))
+        grf_torque = transition["sampled_qp_grf_conditioning_torque"]
         raw = heads.predict_grf(latent, explicit, grf_torque)
         deployment = heads.grf_to_physical(raw).reshape(3, 4, 3)
         torch.testing.assert_close(qp_forces, deployment, rtol=0, atol=0)
@@ -417,11 +415,14 @@ class EnvironmentActionCaptureTests(unittest.TestCase):
         # affected environments, without retaining a previous episode request.
         untouched = task._hard_pact_raw_action_queue[1].clone()
         task._hard_pact_executed_torque = torch.ones(2, 12)
+        task._hard_pact_decoder_torque = torch.full((2,12),3.)
         with patch.object(task._legacy_task_class, "reset_idx"):
             task.reset_idx(torch.tensor([0]))
         self.assertTrue(task._hard_pact_raw_action_queue[0].eq(0).all())
         self.assertTrue(task._hard_pact_raw_delayed_action[0].eq(0).all())
         self.assertTrue(task._hard_pact_executed_torque[0].eq(0).all())
+        self.assertTrue(task._hard_pact_decoder_torque[0].eq(0).all())
+        self.assertTrue(task._hard_pact_decoder_torque[1].eq(3).all())
         torch.testing.assert_close(task._hard_pact_raw_action_queue[1], untouched)
 
 

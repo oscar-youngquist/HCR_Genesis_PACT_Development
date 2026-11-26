@@ -103,6 +103,9 @@ class PPO_PACT_Pos:
                  latent_active_unit_variance_threshold=1.0e-2,
                  grf_loss_weight=1.0,
                  active_wrench_loss_weight=1.0,
+                 explicit_height_loss_weight=1.0,
+                 torso_force_loss_weights=(1.,1.,2.),
+                 grf_axis_loss_weights=(1.,1.,2.),
                  neutral_wrench_loss_weight=0.25,
                  force_decoder_diagnostics_enabled=False,
                  ):
@@ -137,6 +140,14 @@ class PPO_PACT_Pos:
         self._latent_diagnostics_due = False
         self.grf_loss_weight = float(grf_loss_weight)
         self.active_wrench_loss_weight = float(active_wrench_loss_weight)
+        self.explicit_height_loss_weight=float(explicit_height_loss_weight)
+        self.torso_force_loss_weights=tuple(torso_force_loss_weights)
+        self.grf_axis_loss_weights=tuple(grf_axis_loss_weights)
+        import math
+        if (not math.isfinite(self.explicit_height_loss_weight) or self.explicit_height_loss_weight<0
+                or any(len(w)!=3 or any(not math.isfinite(x) or x<0 for x in w)
+                       for w in (self.torso_force_loss_weights,self.grf_axis_loss_weights))):
+            raise ValueError('Height/XYZ supervision weights must be finite nonnegative (XYZ length 3)')
         self.neutral_wrench_loss_weight = float(neutral_wrench_loss_weight)
         self.force_decoder_diagnostics_enabled = bool(
             force_decoder_diagnostics_enabled
@@ -290,8 +301,10 @@ class PPO_PACT_Pos:
                 raise RuntimeError(
                     "HardPACTPos auxiliary heads require hard_pact_transition labels"
                 )
+            # Reuse the owned storage slot, but never condition on the future
+            # interval-average actuation label.
             self.transition.executed_torque_targets = hard_pact[
-                "interval_executed_torque"
+                "previous_executed_torque"
             ]
             self.transition.wrench_targets = hard_pact[
                 "total_external_wrench_label_yaw_normalized"
@@ -876,15 +889,19 @@ class PPO_PACT_Pos:
     def _masked_explicit_loss(
         prediction, contact_logits, target, valid,
         contact_probability_loss_weight=1.0,
+        explicit_height_loss_weight=1.0,
     ):
         """Combine continuous MSE with independently weighted contact BCE."""
         if prediction.shape[-1] not in (11,12) or target.shape[-1] != prediction.shape[-1]:
             raise ValueError("HardPACTPos explicit estimates and labels must match (12-D height or legacy 11-D)")
         target = target.detach()
-        continuous_loss = torch.cat((
+        continuous = torch.cat((
             (prediction[:, :3] - target[:, :3]).square(),
             (prediction[:, 7:] - target[:, 7:]).square(),
-        ), dim=-1).mean(dim=-1)
+        ), dim=-1)
+        if prediction.shape[-1]==12:
+            continuous=continuous*continuous.new_tensor([1.]*7+[explicit_height_loss_weight])
+        continuous_loss=continuous.mean(dim=-1)
         contact_loss = F.binary_cross_entropy_with_logits(
             contact_logits, target[:, 3:7], reduction="none"
         ).mean(dim=-1)
@@ -990,13 +1007,14 @@ class PPO_PACT_Pos:
                 cenet_torso_velo, estimator.contact_logits,
                 explicit_labels_batch, valid,
                 self.contact_probability_loss_weight,
+                self.explicit_height_loss_weight,
             )
             heads = self.actor_critic.physics_heads(
                 cenet_latent, cenet_torso_velo,
                 executed_torque_target.detach(),
             )
             grf_loss = normalized_grf_huber_loss(
-                heads.grf_normalized, grf_target.detach(), valid,
+                heads.grf_normalized, grf_target.detach(), valid, axis_weights=self.grf_axis_loss_weights,
             )
             if self._grf_diagnostics is not None:
                 self._grf_diagnostics.update(
@@ -1008,10 +1026,10 @@ class PPO_PACT_Pos:
             active = valid & wrench_active_mask.bool()
             neutral = valid & ~wrench_active_mask.bool()
             wrench_active_loss = normalized_wrench_huber_loss(
-                heads.wrench_raw_normalized, wrench_target.detach(), active,
+                heads.wrench_raw_normalized, wrench_target.detach(), active, axis_weights=self.torso_force_loss_weights,
             )
             wrench_neutral_loss = normalized_wrench_huber_loss(
-                heads.wrench_raw_normalized, wrench_target.detach(), neutral,
+                heads.wrench_raw_normalized, wrench_target.detach(), neutral, axis_weights=self.torso_force_loss_weights,
             )
             explicit_linear = self._masked_mse(
                 cenet_torso_velo[:, :3], explicit_labels_batch[:, :3], valid

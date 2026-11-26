@@ -207,6 +207,8 @@ class ActorCritic_HardPACT(nn.Module):
                  grf_decoder_layers=(128, 128),
                  wrench_decoder_layers=(128, 128),
                  grf_scale_n=None,
+                 height_label_mode='center_weighted',
+                 height_label_sigma_m=.20,
                  wrench_scale=None,
                  wrench_qp_clip=None,
                  contact_epsilon=1.0e-2,
@@ -248,6 +250,8 @@ class ActorCritic_HardPACT(nn.Module):
             grf_hidden_layers=grf_decoder_layers,
             wrench_hidden_layers=wrench_decoder_layers,
             grf_scale_n=grf_scale_n,
+            height_label_mode=height_label_mode,
+            height_label_sigma_m=height_label_sigma_m,
             wrench_scale=wrench_scale,
             wrench_qp_clip=wrench_qp_clip,
             grf_swing=grf_swing,
@@ -403,7 +407,7 @@ class ActorCritic_HardPACT(nn.Module):
         return params_act, params_enc
 
     def physics_heads(self, latent_sample, explicit, nominal_torque):
-        """Evaluate physics decoders from a reparameterized latent sample."""
+        """Torque argument is the detached previous-executed snapshot, not an action."""
         return self.physics_estimator(latent_sample, explicit, nominal_torque)
 
     def physics_heads_from_history(

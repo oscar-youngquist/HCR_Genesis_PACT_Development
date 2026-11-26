@@ -262,6 +262,7 @@ def test_real_ppo_update_runs_encoder_then_three_decoders(diagnostics, valid_row
     for field in (storage.observation_targets, storage.explicit_labels, storage.grf_targets):
         field[0, valid_rows:] = float("nan")
     storage.hard_pact_fields = {
+        "previous_executed_torque": torch.randn(1, 3, 12),
         "sampled_action_delay": torch.zeros(1, 3, 1, dtype=torch.long),
         "delayed_action_source_valid": torch.ones(1, 3, 1, dtype=torch.bool),
         "total_external_wrench_label_yaw_normalized": torch.zeros(1, 3, 6),
