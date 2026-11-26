@@ -9,13 +9,12 @@ randomized mass and CoM. The decoder no longer represents inertial-parameter
 mismatch.
 
 For an application point P and base origin O, `M_O = M_P + (p_P-p_O) cross F`.
-This label-only shift uses the actual rotated offset each physics substep,
+This application/label shift uses the actual rotated offset each physics substep,
 before yaw conversion and control-interval averaging. Yaw-local axes do not
 change the reference point. Normalization, active/neutral masks and transition
 validity remain unchanged.
 Instantaneous velocity kicks still have no force label and retain their
-existing physics-validity exclusion. No physical randomization or force
-application changes were made.
+existing physics-validity exclusion. Physical randomization is unchanged.
 
 The historical `total_external_wrench_label_*` field names and widths remain
 for storage/critic compatibility; "total" now means total **applied** external
@@ -52,8 +51,9 @@ New HardPACT/HardPACTPos configs enable
 `domain_rand.persistent_wrench_at_com = True`. Persistent forces are applied at
 the torso's nominal CoM plus its current randomized displacement, rotated into
 world space each physics substep. Supplied torques are free moments about that
-point. Isaac Lab's composer handles the equivalent link-origin moment; no
-second lever-arm correction is added during application. Setting the flag to
+point. The adapter explicitly composes `M + r cross F` about the link origin
+using the same helper as labels, then submits force/torque **without positions**.
+No second lever-arm correction is added. Setting the flag to
 `False` restores the previous Isaac Lab link-origin application. Missing flags
 in legacy configurations also retain that behavior. Genesis already uses
 `link_com` and is unchanged. This does not enable persistent wrenches in BR/MULE
@@ -62,10 +62,72 @@ or change instantaneous velocity pushes.
 The label adapter includes both nominal and randomized CoM offsets. With the
 flag disabled Isaac Lab applies at the link origin, so no shift is needed.
 Genesis applies at `link_com`; its adapter reads `get_links_pos(ref='link_com')`
-and `ref='link_origin'` and shifts the label accordingly. Physics still receives
-the original, unshifted command. Offset replay metadata is diagnostic only.
+and `ref='link_origin'` and shifts the label accordingly. Genesis still receives
+the original command; Isaac Lab receives its equivalent link-origin wrench.
+Offset replay metadata is diagnostic only.
 QP, FF support guidance, PPO replay and deployment all consume the base-origin
 prediction directly, preserving their existing normalization/clamping rules.
+
+### Isaac Lab explicit-moment application fix (2026-11-25)
+
+Application semantics `base_origin_explicit_moment_v2` correct an installed
+Isaac Lab 0.54.2 / Isaac Sim 5.1.0.0 bug: the Warp kernel
+`set_forces_and_torques_at_position` assigns requested torque, then overwrites it
+with `r cross F` when positions are supplied. The adapter avoids that branch;
+the installed package is not modified. Labels retain applied-load semantics and
+normalization; this fixes physical delivery, not inertial-mismatch supervision.
+
+Verified call chain: the composer converts world axes to **link-local axes**;
+`Articulation.write_data_to_sim()` passes these buffers to PhysX
+`ArticulationView.apply_forces_and_torques_at_position` with `is_global=False`
+and `position_data=None`. The installed API documents the omitted position as
+the **link transform origin, not CoM**. Hence submitting the equivalent moment
+about that origin is necessary, and adds the lever arm exactly once.
+`composer.reset()` refreshes its cached live pose and clears old loads;
+`set`, not `add`, replaces commands. Zero commands clear the force and moment.
+
+The installed deprecated `set_external_force_and_torque` wrapper delegates to
+the same composer and supports world-frame, no-position calls. It is checked
+separately in the startup audit. Older no-composer versions are covered by mock
+adapter regression tests only: they must support `is_global` and the documented
+no-position link-origin convention. No silent frame/CoM assumption or missing-
+argument workaround is provided for incompatible APIs.
+
+Old results with CoM-position application can have labels containing moments
+which physics did not receive. They are not corrected-result caches. New frozen
+evaluation manifests record application semantics; use new output directories.
+Checkpoint tensor dimensions and labels are unchanged, but same-checkpoint
+trajectories can change because explicit moments now physically act. A resumed
+run must document this behavior change; no automatic retraining/migration occurs.
+
+Focused CPU checks: `tests/test_hard_pact_applied_wrench.py` and
+`tests/test_hard_pact_momentum_observer.py`. GPU sanity artifacts are under
+`diagnostics/wrench_application_fix/`, using the **production path without**
+`--momentum-sanity-correct-wrench`. Standing/walking use 10 environments, seed3,
+300 controls, normal foot contact, and known 5 N / 0.5 Nm pulses. The startup
+audit checks both application modes, signed axes, combined loads, randomized
+offsets, replacement and clearing against composer buffers (absolute tolerance
+2e-5 N/Nm), without stepping physics during the audit.
+
+Executed validation: 81 focused tests passed; standing and walking each completed
+300 controls on physical GPU 1 with zero resets. Both 160-case startup audits
+had maximum buffer error 2.861e-6 N/Nm; the direct installed position-kernel
+probe reproduced a missing 0.5 Nm moment. The independent whole-body,
+all-contact/oracle-state momentum observer recovered steady force components
+approximately 5.000 N. For requested 0.5 Nm moments (X/Y/Z), standing recovered
+0.49995/0.50018/0.49999 Nm; walking recovered 0.50150/0.48837/0.50759 Nm.
+Walking has contact/discretization residuals; buffer agreement alone was not
+used as physical validation. Nominal mass/CoM/inertia and zero joint passive
+parameters were verified by readback, with an unrestrained base and normal
+foot-ground contact. This is a short application sanity check, not a policy
+performance or randomized-dynamics guarantee.
+
+Exact test, GPU collection, and offline analysis commands:
+`diagnostics/wrench_application_fix/commands.sh` (run from repository root).
+Each run's `manifest.json` records checkpoint/config hashes and semantics;
+`standing_analysis/` and `walking_analysis/` contain response CSVs, independent
+momentum validation, and plots. `diagnostics/wrench_application_fix/RESULTS.txt`
+records the implementation revision and limitations.
 
 ## Randomized inertia and liquid reactions
 

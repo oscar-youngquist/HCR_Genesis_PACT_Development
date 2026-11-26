@@ -15,6 +15,8 @@ from legged_gym.simulator.isaaclab_simulator import IsaacLabSimulator
 class IsaacLabSimulator_PACT(IsaacLabSimulator):
     """Thin Isaac Lab backend adapter for the shared PACT task logic."""
 
+    hard_pact_wrench_application_semantics = 'base_origin_explicit_moment_v2'
+
     def _configure_viewer_visuals(self):
         from legged_gym.simulator.isaaclab_viewer import configure_robot_visibility, select_rendered_envs
         self._rendered_envs_idx = select_rendered_envs(self._cfg.viewer, self._num_envs)
@@ -179,22 +181,19 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
         return self._default_com_pos + self._base_com_bias
 
     def hard_pact_apply_base_wrench_world(self, wrench):
-        """Set a world wrench, optionally at the current randomized torso CoM."""
-        force = wrench[:, :3].unsqueeze(1)
-        torque = wrench[:, 3:].unsqueeze(1)
-        options = {}
-        domain_rand = getattr(getattr(self, "_cfg", None), "domain_rand", None)
-        if getattr(domain_rand, "persistent_wrench_at_com", False):
-            data = self._robot.data
-            rotation = data.body_link_quat_w[:, self._base_link_index][:, (1, 2, 3, 0)]
-            position = data.body_link_pos_w[:, self._base_link_index] + quat_apply(
-                rotation, self.hard_pact_wrench_application_offset_body())
-            # Composer converts this point's wrench to an equivalent link-origin
-            # wrench. Do not also add r x F here (that would count it twice).
-            options["positions"] = position[:, None, :]
+        """Replace world force/free moment using the configured application point.
+
+        PhysX ArticulationView with position_data=None applies at link transforms,
+        NOT at CoM. Compose M + r x F once using the same live geometry as labels.
+        Do not pass positions: Isaac Lab 0.54.2's composer position path overwrites
+        explicit torque with r x F. No installed-package modification is required.
+        """
+        equivalent = self.hard_pact_wrench_at_base_origin_world(wrench)
+        force = equivalent[:, :3].unsqueeze(1)
+        torque = equivalent[:, 3:].unsqueeze(1)
         composer = getattr(self._robot, "permanent_wrench_composer", None)
         if composer is not None:
-            # Isaac Lab 5.1's composer is the replacement for the deprecated
+            # Isaac Lab's composer is the replacement for the deprecated
             # Articulation wrapper. ``set`` (rather than ``add``) guarantees
             # that one HardPACT substep cannot accumulate the previous value.
             # Its cached link transform otherwise rotates subsequent world loads incorrectly.
@@ -202,19 +201,21 @@ class IsaacLabSimulator_PACT(IsaacLabSimulator):
             composer.set_forces_and_torques(
                 forces=force, torques=torque,
                 body_ids=[self._base_link_index], is_global=True,
-                **options,
             )
         else:
-            # Compatibility for older Isaac Lab releases; the explicit frame
-            # flag also fixes the former accidental body-frame application.
+            # Legacy buffer API: require world-frame support and its documented
+            # no-position link-origin convention; never silently assume CoM.
             self._robot.set_external_force_and_torque(
                 force, torque, body_ids=[self._base_link_index],
                 is_global=True,
-                **options,
             )
 
     def hard_pact_wrench_at_base_origin_world(self, wrench):
-        """Label-only equivalent of the applied load; never reapply this torque."""
+        """Shared application/label wrench: world axes, moment about base origin.
+
+        Only applied loading is transformed, not randomized inertial mismatch.
+        Disabled CoM application means force at link origin and unchanged moment.
+        """
         from legged_gym.dynamics import wrench_at_point
         domain_rand = getattr(getattr(self, '_cfg', None), 'domain_rand', None)
         if not getattr(domain_rand, 'persistent_wrench_at_com', False):

@@ -30,8 +30,54 @@ def nominal_properties(env):
     s.push_robots=lambda:None
 
 
+def audit_application(s):
+    """Startup buffer checks, no physics advance; restore flags/offsets and clear."""
+    from scripts.hard_pact_shadow_estimation import rotate
+    c=s._robot.permanent_wrench_composer;cfg=s._cfg.domain_rand
+    enabled=cfg.persistent_wrench_at_com;bias=s._base_com_bias.clone()
+    q=s._robot.data.body_link_quat_w[:,s._base_link_index][:,(1,2,3,0)]
+    n=len(q);probe=q.new_zeros(n,6);errors=[]
+    read=lambda:torch.cat((rotate(q,c.composed_force_as_torch[:,s._base_link_index]),
+                          rotate(q,c.composed_torque_as_torch[:,s._base_link_index])),-1)
+    try:
+        # Demonstrate the installed kernel bug directly, separately from adapter.
+        probe[:,3:]=.5;c.reset()
+        c.set_forces_and_torques(forces=probe[:,:3,None].transpose(1,2),torques=probe[:,3:,None].transpose(1,2),
+            positions=s._robot.data.body_link_pos_w[:,s._base_link_index,None,:],body_ids=[s._base_link_index],is_global=True)
+        kernel_error=(read()-probe).abs().amax()
+        for mode in (False,True):
+            cfg.persistent_wrench_at_com=mode
+            for offset in (0.,1.):
+                s._base_com_bias.copy_(bias+offset*bias.new_tensor([.03,-.02,.04]))
+                arm=rotate(q,s._default_com_pos+s._base_com_bias)
+                cases=[q.new_tensor([3.,-4.,5.,-.5,.5,-.5])]
+                cases += [sign*torch.eye(6,device=q.device)[j]*(5 if j<3 else .5) for j in range(6) for sign in (-1,1)]
+                for case_index,value in enumerate(cases):
+                    probe.copy_(value);expected=probe.clone()
+                    if mode:expected[:,3:]+=torch.cross(arm,probe[:,:3],dim=-1)
+                    for _ in range(2):
+                        s.hard_pact_apply_base_wrench_world(probe)
+                        errors.append((read()-expected).abs().amax())
+                    s.hard_pact_apply_base_wrench_world(torch.zeros_like(probe));errors.append(read().abs().amax())
+                    if case_index==0:
+                        # Installed deprecated wrapper delegates to the composer;
+                        # test its no-position/world-frame contract separately.
+                        s._robot.set_external_force_and_torque(expected[:,:3,None].transpose(1,2),
+                            expected[:,3:,None].transpose(1,2),body_ids=[s._base_link_index],is_global=True)
+                        errors.append((read()-expected).abs().amax())
+    finally:
+        cfg.persistent_wrench_at_com=enabled;s._base_com_bias.copy_(bias)
+        s.hard_pact_apply_base_wrench_world(torch.zeros_like(probe))
+    maximum=float(torch.stack(errors).max());assert maximum<2e-5,maximum
+    return dict(semantics=s.hard_pact_wrench_application_semantics,max_abs_error=maximum,tolerance=2e-5,
+        installed_position_kernel_error=float(kernel_error),checks=len(errors),physics_advanced=False,
+        cases='Both modes, nominal/random offsets, live orientation, signed axes, combined loads, repeated replacement, zero clearing; installed deprecated wrapper checked separately')
+
+
 def install(o,mode):
     t=o.tapes
+    if getattr(o.s,'hard_pact_wrench_application_semantics',None):
+        o.manifest['production_wrench_audit']=audit_application(o.s)
     if o.args.momentum_sanity_correct_wrench:
         # Probe the installed API without stepping physics, then restore its buffers.
         from scripts.hard_pact_shadow_estimation import rotate

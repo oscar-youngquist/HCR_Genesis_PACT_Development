@@ -498,6 +498,7 @@ def worker(args, protocol):
                 terrain_source_rows=indices.tolist(),terrain_levels=s.terrain_levels.tolist(),terrain_types=s.terrain_types.tolist(),
                 target_plan=target_plan,
                 environment=class_to_dict(cfg),saved_config=saved,dependencies=dependency_versions(),
+                wrench_application_semantics=getattr(s,'hard_pact_wrench_application_semantics','legacy'),
                 restored_curriculum=dict(next_iteration=state['next_iteration'],
                     progress=dict(env.domain_rand_curriculum.progress),
                     current_wrench_bounds={k:list(env.domain_rand_curriculum.schema[k].range_at(env.domain_rand_curriculum.progress['disturbance']))

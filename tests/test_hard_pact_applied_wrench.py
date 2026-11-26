@@ -59,7 +59,10 @@ def test_pinn_wiring_does_not_consume_mass_wrench_diagnostic():
 
 @pytest.mark.parametrize('composer_api',[True,False])
 @pytest.mark.parametrize('enabled',[True,False])
-def test_isaaclab_wrench_application_point_tracks_full_rotated_com(composer_api,enabled):
+@pytest.mark.parametrize('components',[[3.,4.,-20.,1.,2.,3.]]+
+    [[sign*(5. if axis<3 else .5) if j==axis else 0. for j in range(6)]
+     for axis in range(6) for sign in (-1,1)])
+def test_isaaclab_wrench_application_point_tracks_full_rotated_com(composer_api,enabled,components):
     from legged_gym.simulator.isaaclab_simulator_pact import IsaacLabSimulator_PACT
     sim=object.__new__(IsaacLabSimulator_PACT)
     sim._cfg=SimpleNamespace(domain_rand=SimpleNamespace(persistent_wrench_at_com=enabled))
@@ -75,28 +78,28 @@ def test_isaaclab_wrench_application_point_tracks_full_rotated_com(composer_api,
     if composer_api: sim._robot.permanent_wrench_composer=composer
     else:
         sim._robot.set_external_force_and_torque=lambda force,torque,**kw:calls.append(dict(forces=force,torques=torque,**kw))
-    wrench=torch.tensor([[3.,4.,-20.,1.,2.,3.]])
+    wrench=torch.tensor([components])
     original=wrench.clone()
     for change in (0.,.03):
         sim._base_com_bias[:,0]+=change
+        if change:data.body_link_quat_w[:,1]=torch.tensor([1.,0.,0.,0.])
         sim.hard_pact_apply_base_wrench_world(wrench)
         call=calls[-1]
         assert call['is_global'] and call['body_ids']==[1]
         torch.testing.assert_close(call['forces'],wrench[:,:3,None].transpose(1,2))
-        torch.testing.assert_close(call['torques'],wrench[:,3:,None].transpose(1,2))
+        assert 'positions' not in call
         if enabled:
             offset=sim._default_com_pos+sim._base_com_bias
-            world_offset=torch.stack((-offset[:,1],offset[:,0],offset[:,2]),-1)
-            torch.testing.assert_close(call['positions'][:,0],data.body_link_pos_w[:,1]+world_offset)
-            # Link-origin equivalent moment yields exactly the specified free
-            # torque at CoM; don't pre-add another lever-arm moment in adapter.
+            world_offset=offset if change else torch.stack((-offset[:,1],offset[:,0],offset[:,2]),-1)
             link_moment=wrench[:,3:]+torch.cross(world_offset,wrench[:,:3],dim=-1)
             torch.testing.assert_close(link_moment-torch.cross(world_offset,wrench[:,:3],dim=-1),wrench[:,3:])
-        else: assert 'positions' not in call
+        torch.testing.assert_close(call['torques'][:,0],link_moment if enabled else wrench[:,3:])
         equivalent = sim.hard_pact_wrench_at_base_origin_world(wrench)
         torch.testing.assert_close(equivalent[:,:3], wrench[:,:3])
         torch.testing.assert_close(equivalent[:,3:], link_moment if enabled else wrench[:,3:])
-    assert len(resets)==(2 if composer_api else 0)
+    sim.hard_pact_apply_base_wrench_world(torch.zeros_like(wrench))
+    assert not calls[-1]['forces'].any() and not calls[-1]['torques'].any()
+    assert len(resets)==(3 if composer_api else 0)
     torch.testing.assert_close(wrench,original)
 
 
