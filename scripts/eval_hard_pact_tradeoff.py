@@ -26,7 +26,19 @@ INTERVENTION_VARIANTS = {'A_reference':({},1.), 'B_extra050':({},.5),
     'B_planar10':({'planar_velocity_weight':10.},.5),
     'B_yaw5':({'yaw_rate_weight':5.},.5),
     'B_both_lower':({'planar_velocity_weight':10.,'yaw_rate_weight':5.},.5),
-    'C_torque30':({'torque_tracking_weight':30.},1.), 'D_true_wrench':({},1.)}
+    'C_torque30':({'torque_tracking_weight':30.},1.), 'D_true_wrench':({},1.),
+    'E_rebalanced':({'torque_tracking_weight':15.,'force_tracking_weight':.5,
+        'contact_acceleration_weight':.05,'attitude_weight':.05,'height_weight':.25,
+        'planar_velocity_weight':5.,'yaw_rate_weight':5.},1.),
+    'F_no_torso':({'torque_tracking_weight':15.,'force_tracking_weight':.5,
+        'contact_acceleration_weight':.05,'attitude_weight':0.,'height_weight':0.,
+        'planar_velocity_weight':5.,'yaw_rate_weight':5.},1.),
+    'H_weak_torso':({'torque_tracking_weight':15.,'force_tracking_weight':.5,
+        'contact_acceleration_weight':.05,'attitude_weight':.01,'height_weight':.01,
+        'planar_velocity_weight':5.,'yaw_rate_weight':5.},1.),
+    'G_equal_stability':({'torque_tracking_weight':15.,'force_tracking_weight':.5,
+        'contact_acceleration_weight':.1,'attitude_weight':.1,'height_weight':.1,
+        'planar_velocity_weight':5.,'yaw_rate_weight':5.},1.)}
 ALL_VARIANTS = {**VARIANTS,**ATTITUDE_VARIANTS,**INTERVENTION_VARIANTS}
 sys.path.insert(0, str(ROOT))
 from scripts.eval_hard_pact_frozen import apply_config, sha_file, tensor_hash, dependency_versions
@@ -87,6 +99,11 @@ class Observer(matched.Observer):
         self.solve_data = self.result = None
         self.before_hash = tensor_hash(actor.state_dict())
         self.probe=None
+        self.video=None
+        if getattr(args,'recovery_diagnostic',False):
+            from scripts.hard_pact_recovery_probe import RecoveryProbe
+            self.probe=RecoveryProbe(env.num_envs,env.device,env.dt,True,
+                args.probe_duration,args.probe_confirmation,max_duration=args.probe_duration,cap=args.probe_cap)
         if getattr(args,'attitude_probe',False):
             from scripts.hard_pact_recovery_probe import RecoveryProbe
             self.probe=RecoveryProbe(env.num_envs,env.device,env.dt,ATTITUDE_VARIANTS[args.worker][1],
@@ -113,6 +130,11 @@ class Observer(matched.Observer):
             if getattr(args,'intervention_sweep',False):
                 self.assembly_weights+=(qp.cfg.attitude_weight,qp.cfg.planar_velocity_weight,qp.cfg.yaw_rate_weight)
             if self.probe is not None:self.assembly_weights+= (qp.cfg.attitude_weight,)
+            if getattr(args,'preservation_visual',False):
+                self.record('assembled_seven_weights',data['tau_nom'].new_tensor([
+                    getattr(qp.cfg,k) for k in ('torque_tracking_weight','force_tracking_weight',
+                    'contact_acceleration_weight','attitude_weight','height_weight','planar_velocity_weight','yaw_rate_weight')
+                ]).expand(env.num_envs,-1))
             return self.build
         qp._build = assembly
         termination = env.check_termination
@@ -144,11 +166,22 @@ class Observer(matched.Observer):
                     if name in enabled:geometry |= reasons[:,index]
                 q,v=e._canonical_joint_state()
                 hard=reasons[:,0] | ~torch.isfinite(torch.cat((q,v,self.body_velocity()),-1)).all(-1)
+                healthy=None
+                if getattr(args,'recovery_diagnostic',False):
+                    # Only roll/low-height are deferred. Other original safety bounds stay hard.
+                    geometry=reasons[:,1]|reasons[:,3]
+                    hard |= reasons[:,2]|reasons[:,4]
+                    healthy=(angle[:,0].abs()<=e.cfg.termination.roll_threshold-args.probe_hysteresis_rad)&(
+                        height>=e.cfg.termination.height_min+args.probe_hysteresis_m)&~hard
                 decision=self.probe.update(e.reset_buf.bool(),e.fail_buf>e.cfg.env.fail_to_terminal_time_s/e.dt,
-                    geometry,hard,reasons[:,5]|reasons[:,6],self.t)
+                    geometry,hard,reasons[:,5]|reasons[:,6],self.t,healthy=healthy)
                 for name,value in decision.items():self.record(name,value,control=True)
                 e.reset_buf.copy_(decision['actual_reset'])
                 self.record('reset',e.reset_buf.bool(),control=True)
+            if getattr(args,'preservation_visual',False):
+                self.record('base_position_world',s._robot.data.root_link_pos_w,control=True)
+                self.record('terrain_height_reference',s.measured_heights.mean(-1),control=True)
+                if self.video is not None:self.video.capture()
         env.check_termination = terminated
         # QP choices cannot consume command/randomization RNG. No extra draws
         # inside the production sampler; only isolate its existing RNG stream.
@@ -189,7 +222,14 @@ class Observer(matched.Observer):
         q=d['base_quaternion']; yaw=torch.atan2(2*(q[:,3]*q[:,2]+q[:,0]*q[:,1]),1-2*(q[:,1]**2+q[:,2]**2))
         tilt=torch.stack((-2*(q[:,1]*q[:,2]-q[:,3]*q[:,0]),2*(q[:,0]*q[:,2]+q[:,3]*q[:,1]),torch.zeros_like(yaw)),-1)
         C,e,_=self.qp._velocity_tracking_affine(d,A,b,horizon_s=c.qp_velocity_objective_horizon_s)
-        H,h,desired=self.qp._height_affine(d,A,b)
+        height_data=d
+        if 'estimated_height' not in d:
+            # Zero-weight production assembly intentionally omits height inputs.
+            # Restore held estimates only for detached diagnostics, not the solve.
+            from rsl_rl.modules.hard_pact_physics import estimated_qp_height_inputs
+            height_data=dict(d,**estimated_qp_height_inputs(
+                self.e._hard_pact_policy_explicit[ids],d['base_quaternion'],c.height_velocity_obs_scale))
+        H,h,desired=self.qp._height_affine(height_data,A,b)
         def values(x,a):
             contact=torch.einsum('bfkn,bn->bfk',d['foot_jacobians'],a)+d['foot_acceleration_bias']
             angular=(d['base_jacobian'][:,3:6]@a[...,None]).squeeze(-1)+c.attitude_kp*tilt+c.attitude_kd*d['base_angular_velocity_world']
@@ -296,7 +336,7 @@ class Observer(matched.Observer):
             weights_unchanged=tensor_hash(self.actor.state_dict())==self.before_hash,
             torch_peak_allocated_bytes=torch.cuda.max_memory_allocated(),torch_peak_reserved_bytes=torch.cuda.max_memory_reserved(),
             steady_wall_s=time.monotonic()-getattr(self,'warm_start',self.start),
-            steady_control_steps=max(count-100,0),physical_gpu=1)
+            steady_control_steps=max(count-100,0),physical_gpu=self.args.physical_gpu)
         write_json(self.out/'progress.json',progress)
         if complete:
             result=report.summarize(self.out)
@@ -333,6 +373,9 @@ class Observer(matched.Observer):
             if getattr(self.args,'wrench_stress',False):
                 from scripts.hard_pact_wrench_stress import save_metrics
                 save_metrics(self,arrays,result)
+                if self.probe is not None:
+                    from scripts.hard_pact_recovery_probe import save_probe
+                    save_probe(self,arrays,result)
                 if self.args.worker=='off':return
             if getattr(self.args,'intervention_sweep',False):
                 from scripts.hard_pact_intervention_eval import save
@@ -358,11 +401,20 @@ def worker(args, protocol):
     args.intervention_sweep=protocol.get('intervention_sweep',False)
     args.wrench_stress=protocol.get('wrench_stress',False)
     args.load=protocol.get('load','light')
-    for key in ('probe_extension','probe_confirmation','capture_cap','probe_source'):
+    for key in ('probe_extension','probe_confirmation','capture_cap','probe_source',
+                'preservation_visual','recovery_diagnostic','probe_duration','probe_cap',
+                'probe_hysteresis_rad','probe_hysteresis_m','video','discard_video'):
         if key in protocol:setattr(args,key,protocol[key])
     import torch
     from legged_gym.scripts.train_hard_pact import prepare_solver_runtime
     prepare_solver_runtime(['--qp_solver','cupiqp'])
+    if getattr(args,'video',False):
+        # Isaac Sim 5.1 Replicator annotations use Warp's old module alias.
+        # Evaluation process only; same Kernel class, no numerical changes.
+        import warp
+        if not hasattr(warp,'context'):
+            from warp._src import context
+            warp.context=context
     torch.cuda.set_device(0)
     import legged_gym.envs
     from legged_gym.utils import task_registry
@@ -440,6 +492,9 @@ def worker(args, protocol):
             if args.wrench_stress:
                 from scripts.hard_pact_wrench_stress import install
                 install(observer)
+            if getattr(args,'video',False):
+                from scripts.hard_pact_eval_video import Recorder
+                observer.video=Recorder(observer)
             if args.intervention_sweep:
                 manifest['execution_diagnostics_convention']='Execution costs/constraints hold optimized GRFs fixed; not an executed force measurement or certificate.'
             write_json(observer.out/'manifest.json',manifest)
@@ -462,6 +517,7 @@ def worker(args, protocol):
                     print('PROGRESS',args.worker,args.seed,t+1,args.steps,flush=True)
             torch.cuda.synchronize()
             observer.save(args.steps,True)
+            if observer.video is not None:observer.video.close()
             assert tensor_hash(actor.state_dict())==observer.before_hash
             print('COMPLETE',args.worker,args.seed,flush=True)
     except BaseException:
@@ -479,6 +535,7 @@ def worker(args, protocol):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--output',type=Path,required=True)
+    p.add_argument('--physical-gpu',type=int,default=1)
     p.add_argument('--steps',type=int,default=2000)
     p.add_argument('--seeds',type=int,nargs='+',default=[1,2,3])
     p.add_argument('--worker',choices=ALL_VARIANTS)
@@ -493,13 +550,27 @@ def main():
     p.add_argument('--probe-extension',type=float,default=.2)
     p.add_argument('--probe-confirmation',type=float,default=.5)
     p.add_argument('--capture-cap',type=int,default=24)
+    p.add_argument('--preservation-visual',action='store_true')
+    p.add_argument('--recovery-diagnostic',action='store_true')
+    p.add_argument('--probe-duration',type=float,default=1.)
+    p.add_argument('--probe-cap',type=int,default=3)
+    p.add_argument('--probe-hysteresis-rad',type=float,default=.05)
+    p.add_argument('--probe-hysteresis-m',type=float,default=.02)
+    p.add_argument('--video',action='store_true')
+    p.add_argument('--discard-video',action='store_true',help='Match video runtime/render calls, discard frames without encoding')
     p.add_argument('--checkpoint',type=Path,help='Explicit immutable checkpoint from the exact event-file run')
     args=p.parse_args();args.output=args.output.resolve()
+    if args.discard_video:args.video=True
     if args.wrench_stress:args.intervention_sweep=True
+    if args.recovery_diagnostic or args.video:args.preservation_visual=True
+    if args.recovery_diagnostic and not args.wrench_stress:p.error('Recovery diagnostic requires matched wrench tapes')
     if not 1<=args.steps<=2000: p.error('bounded evaluation requires 1..2000 steps')
     if args.worker:
-        if os.environ.get('CUDA_VISIBLE_DEVICES')!='1':raise RuntimeError('Physical GPU 1 required')
-        return worker(args,json.loads((args.output/'protocol.json').read_text()))
+        protocol=json.loads((args.output/'protocol.json').read_text())
+        args.physical_gpu=protocol.get('physical_gpu',1)
+        if os.environ.get('CUDA_VISIBLE_DEVICES')!=str(args.physical_gpu):raise RuntimeError('Physical GPU visibility mismatch')
+        return worker(args,protocol)
+    if args.physical_gpu<0:p.error('physical GPU must be nonnegative')
     if args.attitude_probe and args.seeds!=[1]:p.error('Attitude/probe experiment requires --seeds 1')
     if args.capture_cap<0:p.error('capture cap must be nonnegative')
     if args.intervention_sweep and args.attitude_probe:p.error('Distinct experiments; do not combine presets')
@@ -525,11 +596,15 @@ def main():
         protocol=dict(schema=1,event=str(matches[0]),checkpoint=str(checkpoint),checkpoint_sha256=sha_file(checkpoint),
             checkpoint_iteration=int(checkpoint.stem.split('_')[-1]),config=str(run/'hard_pact_resolved_config.json'),
             code_sha=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),
-            evaluator_sha256=sha_file(Path(__file__)),steps=args.steps,physical_gpu=1,seeds=args.seeds,variants=args.variants,
+            evaluator_sha256=sha_file(Path(__file__)),steps=args.steps,physical_gpu=args.physical_gpu,seeds=args.seeds,variants=args.variants,
             attitude_probe=args.attitude_probe,probe_source=str(args.probe_source.resolve()),
             intervention_sweep=args.intervention_sweep,
             wrench_stress=args.wrench_stress,load=args.load,
             probe_extension=args.probe_extension,probe_confirmation=args.probe_confirmation,capture_cap=args.capture_cap,
+            preservation_visual=args.preservation_visual,recovery_diagnostic=args.recovery_diagnostic,
+            probe_duration=args.probe_duration,probe_cap=args.probe_cap,
+            probe_hysteresis_rad=args.probe_hysteresis_rad,probe_hysteresis_m=args.probe_hysteresis_m,video=args.video,
+            discard_video=args.discard_video,
             argv=sys.argv,restart='Completed trials skipped; interrupted trials restart from seed, not exact PhysX.')
         protocol['config_sha256']=sha_file(Path(protocol['config']))
         protocol['diagnostic_helper_sha256']=sha_file(ROOT/'scripts/hard_pact_intervention_eval.py')
@@ -552,8 +627,12 @@ def main():
         for variant in args.variants:
             out=args.output/f'{variant}_seed{seed}';out.mkdir(exist_ok=True)
             if (out/'result.json').exists():continue
-            env=dict(os.environ,CUDA_VISIBLE_DEVICES='1',SIMULATOR='isaaclab',PYTHONPATH=str(ROOT),
+            env=dict(os.environ,CUDA_VISIBLE_DEVICES=str(args.physical_gpu),SIMULATOR='isaaclab',PYTHONPATH=str(ROOT),
                 PYTHONUNBUFFERED='1',OMP_NUM_THREADS='1',LD_PRELOAD=str(Path(sys.executable).parents[1]/'lib/libstdc++.so.6'))
+            if args.video:
+                env['ENABLE_CAMERAS']='1'
+                if os.environ.get('HARDPACT_EVAL_NUMPY_PATH'):
+                    env['PYTHONPATH']=os.environ['HARDPACT_EVAL_NUMPY_PATH']+os.pathsep+str(ROOT)
             with (out/'run.log').open('w') as log:
                 status=subprocess.run([sys.executable,str(Path(__file__).resolve()),'--worker',variant,'--seed',str(seed),
                     '--steps',str(args.steps),'--output',str(args.output)],cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT)

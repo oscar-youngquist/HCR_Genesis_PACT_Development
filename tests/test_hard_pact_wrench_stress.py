@@ -42,6 +42,9 @@ def test_velocity_stress_override_matrix_and_offline_unavailable():
     assert INTERVENTION_VARIANTS['B_both_lower']==({'planar_velocity_weight':10.,'yaw_rate_weight':5.},.5)
     assert stats([float('nan')])['rms'] is None
     assert stats(np.array([True,False]))['mean']==.5
+    weights,strength=INTERVENTION_VARIANTS['E_rebalanced']
+    assert list(weights.values())==[15.,.5,.05,.05,.25,5.,5.] and strength==1.
+    assert not any('scale' in k or 'recovery' in k or 'regular' in k for k in weights)
 
 
 def test_velocity_stress_masks_reset_and_teleport_without_losing_failures():

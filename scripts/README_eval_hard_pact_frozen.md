@@ -515,3 +515,89 @@ environments x 1000 controls. Completed conditions are skipped; reports include
 paired input/config assertions, active exposure, and world-vertical velocity.
 Seed-specific CSV/JSON and plots, manifests, bounded histories and source copies
 are retained. No optimizer is constructed or updated by this evaluation.
+
+### Preservation videos and bounded recovery probes
+
+`run_hard_pact_visual_preservation.py` extends the same pinned experiment with
+Rebalanced (torque15, GRF0.5, stance0.05, attitude0.05, height0.25, planar5,
+yaw5), preserving normalization, recovery penalties and numerical regularization.
+Two completed seed3 reference assessments are copied with provenance; eight
+assessments are collected. Five seed2 video rollouts and five separate seed2
+probe rollouts are bounded to1000 controls; the video rollouts supply all five
+seed2 assessments so rendering/NumPy runtime is matched within seed. Final reports assert matched inputs and
+the full configuration override allowlist. Rendering time is recorded separately.
+
+On this machine, cuPIQP needs installed Warp1.17, while Isaac Sim5.1 Replicator
+expects its legacy `warp.context` alias and NumPy1.x ABI. The recorder adds only
+the missing class-module alias in its process. Use an isolated NumPy directory
+for video workers; do not downgrade the training environment:
+
+```bash
+python -m pip install --no-deps --target /tmp/hardpact_eval_numpy126 numpy==1.26.4
+HARDPACT_EVAL_NUMPY_PATH=/tmp/hardpact_eval_numpy126 CUDA_VISIBLE_DEVICES=1 SIMULATOR=isaaclab PYTHONPATH=. python scripts/run_hard_pact_visual_preservation.py --output diagnostics/preservation_visual15000/full
+python scripts/run_hard_pact_visual_preservation.py --output diagnostics/preservation_visual15000/full --phase report
+```
+
+Videos retain full approaches and failures, 50fps/1x, three matched center-high
+pyramid stair environments. Their legacy family name is `stairs_up`; outward
+walking descends. Conversely, `stairs_down` spawns at the low center of an
+inverted pyramid. `descent_verification.json` tests actual terrain-reference
+drop plus horizontal displacement within an episode; inspect videos as well.
+The height overlay is the exact termination quantity: base-link world z minus
+the mean sampled terrain heights, NOT independent torso-ground clearance.
+
+`--recovery-diagnostic` is independent of old attitude presets. Defaults in the
+driver: at most3 roll/low-height events, maximum1s continuation, continuous0.25s
+confirmation (rounded up to13 control ticks), 0.05rad roll and0.02m height
+hysteresis. Contact/nonfinite/pitch/high-height safety remains active. A relapse
+restarts confirmation; expiry is unresolved, not recovered. All outcomes force
+a reset. Original events and ordinary/probe exposure remain separate. The
+standard assessment never uses probe survival or episode lengths.
+
+Event plots include healthy comparisons where available. Repeated reversals
+use local extrema with0.05rad prominence; this describes only the captured
+window, not a causal diagnosis or proof of long-term recovery.
+
+### Checkpoint-15000 torso-objective screen
+
+`F_no_torso` uses torque/GRF/stance/attitude/height/planar/yaw weights
+`15/0.5/0.05/0/0/5/5`; `G_equal_stability` uses `15/0.5/0.1/0.1/0.1/5/5`.
+Both preserve four full-strength interventions and all other saved settings.
+`--discard-video` retains the prior video runtime, camera warmup and render calls,
+but does not encode or save movies. Physical time is unchanged by rendering.
+Zero-weight torso objectives skip production assembly; detached evaluation-only
+residuals still use the held estimated height/velocity. Measured posture remains
+reported independently of objective costs.
+
+```bash
+HARDPACT_EVAL_NUMPY_PATH=/tmp/hardpact_eval_numpy126 CUDA_VISIBLE_DEVICES=1 SIMULATOR=isaaclab PYTHONPATH=. python scripts/eval_hard_pact_tradeoff.py --wrench-stress --preservation-visual --discard-video --event events.out.tfevents.1795413624.CICSUNIX-US-003.133079.0 --checkpoint logs/hardpact_iclr/go2_hard_pact_rss_full/Nov23_01-00-22_hard_pact_rss_full_isaaclab/model_15000.pt --output diagnostics/torso_screen15000/full --steps 1000 --seeds 2 --variants F_no_torso G_equal_stability
+PYTHONPATH=. python scripts/report_hard_pact_torso_screen.py --output diagnostics/torso_screen15000/full
+```
+
+The report audits cached seed-2 QP-off/Rebalanced provenance and initial-input
+parity. Active/inactive failure rates use their own environment-second exposure;
+motion statistics exclude reset/teleport controls. Event plots intentionally retain
+the terminal sample, clearly marked, without adding it to tracking statistics.
+Command-aligned speed excludes planar commands <=0.1 m/s. Angular rates are
+body-frame x/y rates, not Euler derivatives. World vertical velocity uses the
+post-step velocity and matching next pre-step orientation, excluding reset rows.
+# Paired torso confirmation (checkpoint 15000)
+
+`scripts/run_hard_pact_torso_confirmation.py` runs exactly six missing trials,
+sequentially on physical GPU 0: no-torso seed 3, weak-torso seeds 2/3/4,
+and QP-off/rebalanced seed 4. It verifies cached seed-2/3 provenance before
+reuse. Weak torso uses weights `15 / .5 / .05 / .01 / .01 / 5 / 5`.
+
+```bash
+/home/oyoungquist/.conda/envs/lr_lab_cupiqp/bin/python scripts/run_hard_pact_torso_confirmation.py
+# Rebuild only the offline report (no simulator):
+/home/oyoungquist/.conda/envs/lr_lab_cupiqp/bin/python scripts/run_hard_pact_torso_confirmation.py --report-only
+```
+
+Outputs: `diagnostics/torso_confirmation15000/full/report`. Exact worker
+commands are saved in `full/commands.json`. Seed 2 retains the cached camera
+warmup/render calls but discards frames (no new videos); seeds 3/4 are headless.
+Pair comparisons within each seed. No-torso has only seeds 2/3 and is never
+pooled with the three-seed comparisons. Physical GPU differs from cached
+runs; initial-state/tape equality does not guarantee identical PhysX trajectories.
+

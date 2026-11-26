@@ -7,7 +7,7 @@ from pathlib import Path
 class RecoveryProbe:
     # Outcome: 0=none/pending, 1=sustained recovery, 2=delayed failure,
     # 3=unresolved (timeout/safety relocation or end-of-evaluation).
-    def __init__(self,n,device,dt,enabled,extension=.2,confirmation=.5):
+    def __init__(self,n,device,dt,enabled,extension=.2,confirmation=.5,*,max_duration=None,cap=None):
         import torch
         if not all(math.isfinite(v) and v>0 for v in (dt,extension,confirmation)):
             raise ValueError('Probe durations must be finite and positive')
@@ -16,18 +16,27 @@ class RecoveryProbe:
         self.confirmation=math.ceil(confirmation/dt-1e-9)
         self.start=torch.full((n,),-1,device=device,dtype=torch.long)
         self.healthy=self.start.clone()
+        self.max_duration=None if max_duration is None else math.ceil(max_duration/dt-1e-9)
+        if self.max_duration is not None and (max_duration<=0 or confirmation>max_duration):
+            raise ValueError('Confirmation must fit inside positive maximum duration')
+        if cap is not None and cap<0:raise ValueError('Nonnegative event cap required')
+        self.cap=cap;self.used=torch.zeros((),device=device,dtype=torch.long)
 
-    def update(self,reset,failure,geometry_bad,hard,timeout,step):
+    def update(self,reset,failure,geometry_bad,hard,timeout,step,healthy=None):
         import torch
         active=self.start>=0
         ordinary=~active
         event=ordinary & reset & failure
         eligible=event & geometry_bad & ~hard & ~timeout
         start=eligible if self.enabled else torch.zeros_like(eligible)
+        if self.cap is not None:start=start & (start.long().cumsum(0)+self.used<=self.cap)
+        self.used+=start.sum()
         self.start[start]=step
         active=self.start>=0
         # First healthy control observation starts continuous confirmation.
-        first_good=active & ~geometry_bad & (self.healthy<0)
+        good=~geometry_bad if healthy is None else healthy
+        if self.max_duration is not None:self.healthy[active & ~good]=-1
+        first_good=active & good & (self.healthy<0)
         self.healthy[first_good]=step
         elapsed=step-self.start
         confirming=active & (self.healthy>=0)
@@ -35,6 +44,10 @@ class RecoveryProbe:
                         (~confirming & (elapsed>=self.extension)))
         recovered=confirming & ~geometry_bad & ~hard & (step-self.healthy>=self.confirmation)
         unresolved=active & timeout & ~failed & ~recovered
+        if self.max_duration is not None:
+            failed=active & hard
+            recovered=confirming & good & ~hard & (step-self.healthy>=self.confirmation)
+            unresolved=active & (timeout | (elapsed>=self.max_duration)) & ~failed & ~recovered
         done=failed|recovered|unresolved
         outcome=torch.zeros_like(self.start)
         outcome[recovered]=1;outcome[failed]=2;outcome[unresolved]=3
@@ -130,7 +143,10 @@ def save_probe(observer,arrays,result):
                 other=int(candidates[0]);event['reference_env']=other
                 for name in ('correction','contact_probability','contact_truth','velocity_before','stance_slip','joint_position_violation'):
                     captures[f'event{number}_reference_{name}']=arrays[name][start*4:(end+1)*4,other]
-    summary['outcomes']={s:sum(e['outcome']==s for e in events) for s in ('normal_reset','recovered','delayed_failure','unresolved')}
+    if getattr(observer.args,'recovery_diagnostic',False):
+        for event in events:
+            if event['outcome']=='delayed_failure':event['outcome']='hard_stop'
+    summary['outcomes']={s:sum(e['outcome']==s for e in events) for s in ('normal_reset','recovered','delayed_failure','hard_stop','unresolved')}
     starts=sum(e['probe_started'] for e in events)
     summary['probe_starts']=starts
     summary['recovery_fraction']=summary['outcomes']['recovered']/starts if starts else None

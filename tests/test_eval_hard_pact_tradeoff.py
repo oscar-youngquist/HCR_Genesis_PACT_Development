@@ -80,7 +80,8 @@ def test_intervention_sweep_preserves_stance_clipping_and_only_changes_allowlist
         result,alpha,prob,strength=freeze_settings(training,checkpoint,name)
         expected=asdict(ref);expected.update(overrides)
         assert asdict(result)==expected and alpha==1. and prob==(0.,0.,1.) and strength==extra
-        assert result.contact_acceleration_weight==.1 and result.execution_correction_clip_enabled
+        assert result.contact_acceleration_weight==overrides.get('contact_acceleration_weight',.1)
+        assert result.execution_correction_clip_enabled
     assert checkpoint['training_state']['qp_curriculum']['intervention']['progress']==0.
 
 
@@ -107,7 +108,8 @@ def test_failure_ring_wraps_owns_samples_and_respects_cap():
     assert o.failure_ring[0]['value'][-1]==119
 
 
-def test_reported_weighted_cost_changes_match_production_objective():
+@pytest.mark.parametrize('variant',[None,'F_no_torso','G_equal_stability','H_weak_torso'])
+def test_reported_weighted_cost_changes_match_production_objective(variant):
     from test_hard_pact_reduced_qp import inputs,solver
     d=inputs(2);d.update(environment_ids=torch.arange(2),velocity_command=torch.ones(2,3,dtype=torch.float64),
         base_linear_velocity_world=torch.zeros(2,3,dtype=torch.float64),estimated_height=torch.full((2,),.3,dtype=torch.float64),
@@ -116,8 +118,16 @@ def test_reported_weighted_cost_changes_match_production_objective():
     d['foot_jacobians'][:,:,:,:3]=torch.eye(3,dtype=torch.float64)
     qp=solver(height_target=.38,height_weight=.5,attitude_weight=.1,contact_acceleration_weight=.1,
         planar_velocity_weight=20.,yaw_rate_weight=10.)
+    if variant:
+        from dataclasses import replace
+        from scripts.eval_hard_pact_tradeoff import INTERVENTION_VARIANTS
+        qp.cfg=replace(qp.cfg,**INTERVENTION_VARIANTS[variant][0])
     m=qp._build(d);data={}
     o=Observer.__new__(Observer);o.build=m;o.qp=qp;o.e=SimpleNamespace(num_envs=2);o.probe=None
+    if variant=='F_no_torso':
+        explicit=torch.zeros(2,12,dtype=torch.float64);explicit[:,11]=.3
+        o.e._hard_pact_policy_explicit=explicit
+        d.pop('estimated_height');d.pop('estimated_base_linear_velocity_world')
     o.assembly_weights=(.1,20.);o.record=lambda name,value:data.update({name:value})
     r=SimpleNamespace(tau_safe=d['tau_nom']+1,force_world=d['force_pred_world']+2,
         differentiated_mask=torch.ones(2,dtype=torch.bool),recovery_mask=torch.zeros(2,dtype=torch.bool))
@@ -128,3 +138,13 @@ def test_reported_weighted_cost_changes_match_production_objective():
         z=torch.cat((tau,force.flatten(1)),-1)/m.variable_scale
         return .5*torch.einsum('bi,bij,bj->b',z,m.Q,z)+(m.p*z).sum(-1)-.5*qp.cfg.q_regularization*z.square().sum(-1)
     torch.testing.assert_close(delta,value(r.tau_safe,r.force_world)-value(d['tau_nom'],d['force_pred_world']))
+    if variant=='F_no_torso':
+        assert (data['objective_candidate_attitude']==0).all() and (data['objective_candidate_height']==0).all()
+        # Zero-weight targets/gains cannot change assembly; physical residuals remain available.
+        qp.cfg=replace(qp.cfg,height_target=1.2,height_kp=99.,attitude_kp=88.,attitude_kd=77.)
+        other=qp._build(d)
+        torch.testing.assert_close(m.Q,other.Q);torch.testing.assert_close(m.p,other.p)
+        torch.testing.assert_close(m.G,other.G);torch.testing.assert_close(m.h,other.h)
+        assert torch.isfinite(data['objective_candidate_attitude_residual']).all()
+        assert torch.isfinite(data['objective_candidate_height_residual']).all()
+        assert 'estimated_height' not in d  # Diagnostics did not mutate solver inputs.

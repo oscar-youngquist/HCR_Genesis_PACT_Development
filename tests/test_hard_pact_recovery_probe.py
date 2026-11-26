@@ -61,6 +61,44 @@ def test_timeout_unresolved_partial_reset_isolation():
     assert p.start.tolist()==[-1,-1]
 
 
+def test_bounded_probe_hysteresis_relapse_cap_and_hard_stop():
+    p=RecoveryProbe(1,'cpu',.02,True,1.,.25,max_duration=1.,cap=1)
+    v=lambda x:torch.tensor([x])
+    for t in range(51):
+        # A brief return does not meet 250ms confirmation; relapse restarts it.
+        r=p.update(v(True),v(True),v(t<10 or t>=15),v(False),v(False),t,
+                   healthy=v(10<=t<15))
+        assert bool(r['original_event'])==(t==0)
+        assert bool(r['actual_reset'])==(t==50)
+    assert r['probe_outcome'].item()==3
+    assert not bool(call(p,51)['probe_start'])
+    p=RecoveryProbe(1,'cpu',.02,True,1.,.25,max_duration=1.,cap=3)
+    call(p,0);r=call(p,1,hard=True)
+    assert r['probe_outcome'].item()==2
+
+
+def test_bounded_probe_continuous_recovery_and_batch_budget():
+    p=RecoveryProbe(4,'cpu',.02,True,1.,.25,max_duration=1.,cap=3)
+    yes=torch.ones(4,dtype=torch.bool);no=~yes
+    r=p.update(yes,yes,yes,no,no,0)
+    assert r['probe_start'].tolist()==[True,True,True,False]
+    for t in range(1,15):r=p.update(no,no,no,no,no,t,healthy=yes)
+    assert r['probe_outcome'].tolist()==[1,1,1,0]
+    assert p.used==3
+
+
+def test_event_motion_reversals_distinguish_monotonic_excursion():
+    import numpy as np
+    from scripts.report_hard_pact_visual_preservation import motion_shape
+    assert motion_shape(np.linspace(0,1,76))['prominent_reversals']==0
+    wrapped=(np.linspace(2.8,3.8,76)+np.pi)%(2*np.pi)-np.pi
+    fall=motion_shape(wrapped)
+    assert fall['prominent_reversals']==0 and abs(fall['peak_to_peak']-1)<1e-6
+    oscillation=motion_shape(.4*np.sin(np.linspace(0,6*np.pi,76)))
+    assert oscillation['prominent_reversals']==6 and oscillation['peak_to_peak']>.79
+    assert motion_shape([float('nan')])=={'available':False}
+
+
 def test_capture_alignment_exposure_and_failure_denominators(tmp_path):
     import json
     import numpy as np

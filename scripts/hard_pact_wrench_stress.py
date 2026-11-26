@@ -99,6 +99,9 @@ def install(o):
         assert set(overrides)<= {'planar_velocity_weight','yaw_rate_weight'} and strength==.5
         expected.update(overrides,attitude_weight=.1)
     if o.args.worker=='C_torque30':expected['torque_tracking_weight']=30.
+    if o.args.worker in ('E_rebalanced','F_no_torso','G_equal_stability','H_weak_torso'):
+        from scripts.eval_hard_pact_tradeoff import INTERVENTION_VARIANTS
+        expected.update(INTERVENTION_VARIANTS[o.args.worker][0])
     for k,v in expected.items():
         if getattr(o.qp.cfg,k)!=v:raise ValueError(f'Unexpected saved objective {k}: {getattr(o.qp.cfg,k)} != {v}')
     o.tapes=Tapes(o)
