@@ -684,18 +684,18 @@ class GO2HardPACTCfgPPO(LeggedRobotCfgPPO):
             'contact_acceleration_scale_m_s2': 50.0,         # Stance-acceleration residual normalization [m/s^2].
 
             # Inner objective: torso attitude and terrain-relative height
-            'attitude_weight': 0.01,                         # Inner roll/pitch stabilization weight; final curriculum target.
+            'attitude_weight': 0.02,                         # Inner roll/pitch stabilization weight; final curriculum target.
             'attitude_kp': 20.0,                             # Tilt-error gain in desired roll/pitch angular acceleration [1/s^2].
             'attitude_kd': 5.0,                              # Angular-rate damping gain [1/s].
             'attitude_acceleration_scale_rad_s2': 20.0,      # Roll/pitch acceleration residual normalization [rad/s^2].
-            'height_weight': 0.01,                           # Inner height-regulation weight; final curriculum target; 0 skips this objective.
+            'height_weight': 0.02,                           # Inner height-regulation weight; final curriculum target; 0 skips this objective.
             'height_kp': 20.0,                               # Terrain-relative height-error gain [1/s^2].
             'height_kd': 5.0,                                # Predicted world-vertical velocity damping gain [1/s].
             'height_target': None,                           # Target torso height [m]; None uses rewards.base_height_target.
             'height_acceleration_scale': 20.0,               # Vertical-acceleration residual normalization [m/s^2].
 
             # Velocity tracking: independent inner-QP and outer-loss horizons
-            'planar_velocity_weight': 5.0,                   # Inner normalized body-frame planar-velocity tracking weight.
+            'planar_velocity_weight': 7.0,                   # Inner normalized body-frame planar-velocity tracking weight.
             'yaw_rate_weight': 5.0,                          # Inner normalized body-frame yaw-rate tracking weight.
             'planar_velocity_scale_m_s': 1.0,                # Planar-velocity error normalization [m/s].
             'yaw_rate_scale_rad_s': 1.0,                     # Yaw-rate error normalization [rad/s].
